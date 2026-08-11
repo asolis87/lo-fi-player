@@ -106,28 +106,43 @@ func resolveHeadlessBackend(target string) (audio.AudioBackend, error) {
 
 // resolveProcedural maps a procedural:<station> id to the
 // matching SampleGenerator. Returns nil when the station is
-// unknown; callers translate that into an exit-1 stderr message.
+// unknown OR not exposed in slice #1 (per Decision #326 the
+// slice-1 CLI surface only ships procedural:rain; the brown and
+// white generators still exist in internal/audio for future
+// slices but are not surfaced yet). Callers translate nil into
+// an exit-1 stderr message that distinguishes the two cases.
 func resolveProcedural(station string) audio.SampleGenerator {
 	switch strings.TrimPrefix(station, "procedural:") {
 	case "rain":
 		return audio.NewRainGenerator(44100)
-	case "brown":
-		return audio.NewBrownNoiseGenerator(44100)
-	case "white":
-		return audio.NewWhiteNoiseGenerator(44100)
 	}
 	return nil
 }
 
 // proceduralBackend constructs the ProceduralBackend for the
-// given procedural:<station> id. Construction failures (unknown
-// station, nil generator from NewProceduralBackend) surface as
-// exit-1 stderr messages so the user can recover without
-// reading source.
+// given procedural:<station> id. Construction failures fall into
+// two distinct buckets (each exits 1 with a focused message):
+//
+//  1. The station is explicitly not exposed in slice #1
+//     (brown, white). The stderr message names the offending
+//     id and points the user at procedural:rain so they can
+//     recover without reading source.
+//  2. The station is unknown entirely. The stderr message
+//     lists the slice-1 supported stations.
+//
+// A nil NewProceduralBackend construction is its own bucket
+// because it would indicate a programming error rather than a
+// user-facing rejection.
 func proceduralBackend(target string) (audio.AudioBackend, error) {
+	station := strings.TrimPrefix(target, "procedural:")
+	switch station {
+	case "brown", "white":
+		fmt.Fprintf(os.Stderr, "lofi play: %s not available in slice #1; use procedural:rain\n", target)
+		return nil, &commandError{code: 1}
+	}
 	gen := resolveProcedural(target)
 	if gen == nil {
-		fmt.Fprintf(os.Stderr, "lofi play: unknown procedural station %q (want procedural:rain|brown|white)\n", target)
+		fmt.Fprintf(os.Stderr, "lofi play: unknown procedural station %q (want procedural:rain)\n", target)
 		return nil, &commandError{code: 1}
 	}
 	b := audio.NewProceduralBackend(

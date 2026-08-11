@@ -1,0 +1,4 @@
+Placeholder file so the empty catalog/v1/ directory survives
+in git before the first audio bytes land. Safe to delete once
+catalog/v1/manifest.json (or any per-track subdirectory) is
+committed alongside it.

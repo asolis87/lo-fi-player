@@ -72,72 +72,122 @@ func TestPlay_HeadlessUnknownIDExits1(t *testing.T) {
 	}
 }
 
-// TestPlay_HeadlessProceduralStation guards the procedural path:
-// `lofi play procedural:rain|brown|white` MUST build a
-// ProceduralBackend with the matching SampleGenerator and play
-// it through the AudioBackend port without touching audio.Select.
-// This is the headless fallback the spec calls for when no
-// shipped track is wanted.
+// TestPlay_HeadlessProceduralStation guards the procedural path
+// for the only station exposed in slice #1: `lofi play
+// procedural:rain` MUST build a ProceduralBackend with a
+// *audio.RainGenerator and play it through the AudioBackend port
+// without touching audio.Select. This is the headless fallback
+// the spec calls for when no shipped track is wanted.
+//
+// Per Decision #326, the slice-1 CLI surface only exposes
+// procedural:rain. procedural:brown and procedural:white are still
+// available inside internal/audio (the generators exist and the
+// type assertions below document that), but they are rejected by
+// runPlay with an actionable stderr message and exit code 1. The
+// dedicated rejection tests live in TestPlay_HeadlessProceduralBrownRejects
+// and TestPlay_HeadlessProceduralWhiteRejects.
 func TestPlay_HeadlessProceduralStation(t *testing.T) {
 	stubWaitForSignal(t)
 
-	cases := []struct {
-		station string
-		wantGen interface {
-			Next(int) []int16
-			Reset()
-		}
-		check func(t *testing.T)
-	}{
-		{
-			station: "procedural:rain",
-			wantGen: &audio.RainGenerator{},
-			check: func(t *testing.T) {
-				// type checked at the bottom via the wrapper
-			},
-		},
-		{
-			station: "procedural:brown",
-			wantGen: &audio.BrownNoiseGenerator{},
-			check: func(t *testing.T) {},
-		},
-		{
-			station: "procedural:white",
-			wantGen: &audio.WhiteNoiseGenerator{},
-			check: func(t *testing.T) {},
-		},
+	gen := resolveProcedural("procedural:rain")
+	if gen == nil {
+		t.Fatalf("resolveProcedural(procedural:rain) = nil")
 	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.station, func(t *testing.T) {
-			gen := resolveProcedural(tc.station)
-			if gen == nil {
-				t.Fatalf("resolveProcedural(%q) = nil", tc.station)
-			}
-			// Concrete type check via a type switch keeps the
-			// test resilient to future SampleGenerator additions.
-			switch tc.wantGen.(type) {
-			case *audio.RainGenerator:
-				if _, ok := gen.(*audio.RainGenerator); !ok {
-					t.Fatalf("resolveProcedural(%q) = %T, want *audio.RainGenerator", tc.station, gen)
-				}
-			case *audio.BrownNoiseGenerator:
-				if _, ok := gen.(*audio.BrownNoiseGenerator); !ok {
-					t.Fatalf("resolveProcedural(%q) = %T, want *audio.BrownNoiseGenerator", tc.station, gen)
-				}
-			case *audio.WhiteNoiseGenerator:
-				if _, ok := gen.(*audio.WhiteNoiseGenerator); !ok {
-					t.Fatalf("resolveProcedural(%q) = %T, want *audio.WhiteNoiseGenerator", tc.station, gen)
-				}
-			}
+	if _, ok := gen.(*audio.RainGenerator); !ok {
+		t.Fatalf("resolveProcedural(procedural:rain) = %T, want *audio.RainGenerator", gen)
+	}
 
-			// End-to-end through runPlay so the full wiring
-			// (procedural prefix detection, backend construction,
-			// Load, Play, signal-wait stub, Close) is exercised.
-			if err := runPlay([]string{tc.station}); err != nil {
-				t.Fatalf("runPlay(%q): %v", tc.station, err)
-			}
-		})
+	// End-to-end through runPlay so the full wiring (procedural
+	// prefix detection, backend construction, Load, Play,
+	// signal-wait stub, Close) is exercised.
+	if err := runPlay([]string{"procedural:rain"}); err != nil {
+		t.Fatalf("runPlay(procedural:rain): %v", err)
+	}
+}
+
+// TestPlay_HeadlessProceduralRainStillWorks is the slice-1
+// positive case for the Decision #326 procedural gate: rain is
+// the one station surfaced to the CLI in slice #1, so
+// `lofi play procedural:rain` MUST return a nil error from the
+// end-to-end runPlay path.
+func TestPlay_HeadlessProceduralRainStillWorks(t *testing.T) {
+	stubWaitForSignal(t)
+
+	gen := resolveProcedural("procedural:rain")
+	if gen == nil {
+		t.Fatalf("resolveProcedural(procedural:rain) = nil")
+	}
+
+	code, stderr := captureStderr(t, func() int {
+		return codeFor(runPlay([]string{"procedural:rain"}))
+	})
+	if code != 0 {
+		t.Fatalf("runPlay(procedural:rain) code = %d, want 0 (stderr=%q)", code, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("runPlay(procedural:rain) stderr = %q, want empty", stderr)
+	}
+}
+
+// TestPlay_HeadlessProceduralBrownRejects guards Decision #326:
+// procedural:brown is NOT exposed in slice #1 even though the
+// generator exists in internal/audio. runPlay MUST exit 1 with
+// a stderr message that names the station and points the user at
+// procedural:rain.
+func TestPlay_HeadlessProceduralBrownRejects(t *testing.T) {
+	stubWaitForSignal(t)
+
+	code, stderr := captureStderr(t, func() int {
+		return codeFor(runPlay([]string{"procedural:brown"}))
+	})
+	if code != 1 {
+		t.Fatalf("runPlay(procedural:brown) code = %d, want 1", code)
+	}
+	want := []string{
+		"procedural:brown",
+		"not available in slice #1",
+		"procedural:rain",
+	}
+	for _, s := range want {
+		if !strings.Contains(stderr, s) {
+			t.Errorf("stderr missing %q in %q", s, stderr)
+		}
+	}
+
+	// resolveProcedural itself must return nil for brown so the
+	// proceduralBackend construction surface stays consistent.
+	if gen := resolveProcedural("procedural:brown"); gen != nil {
+		t.Errorf("resolveProcedural(procedural:brown) = %T, want nil", gen)
+	}
+}
+
+// TestPlay_HeadlessProceduralWhiteRejects is the white-noise
+// twin of TestPlay_HeadlessProceduralBrownRejects. The contract
+// is identical: procedural:white is not exposed in slice #1, so
+// runPlay exits 1 with an actionable stderr message and
+// resolveProcedural returns nil.
+func TestPlay_HeadlessProceduralWhiteRejects(t *testing.T) {
+	stubWaitForSignal(t)
+
+	code, stderr := captureStderr(t, func() int {
+		return codeFor(runPlay([]string{"procedural:white"}))
+	})
+	if code != 1 {
+		t.Fatalf("runPlay(procedural:white) code = %d, want 1", code)
+	}
+	want := []string{
+		"procedural:white",
+		"not available in slice #1",
+		"procedural:rain",
+	}
+	for _, s := range want {
+		if !strings.Contains(stderr, s) {
+			t.Errorf("stderr missing %q in %q", s, stderr)
+		}
+	}
+
+	if gen := resolveProcedural("procedural:white"); gen != nil {
+		t.Errorf("resolveProcedural(procedural:white) = %T, want nil", gen)
 	}
 }
 
@@ -218,9 +268,11 @@ func TestPlay_NoArgs_TUIErrorPropagates(t *testing.T) {
 }
 
 // TestResolveProcedural_KnownStations exhaustively locks down
-// the procedural: -> SampleGenerator mapping. Adding a new
-// station requires updating this table so dispatchers can rely
-// on the contract.
+// the procedural: -> SampleGenerator mapping. Per Decision #326
+// the slice-1 CLI surface only exposes procedural:rain; the
+// generators for brown and white still exist in internal/audio
+// but resolveProcedural and runPlay MUST refuse them so the
+// surfaced contract is exactly the table below.
 func TestResolveProcedural_KnownStations(t *testing.T) {
 	cases := []struct {
 		station string
@@ -228,8 +280,8 @@ func TestResolveProcedural_KnownStations(t *testing.T) {
 		kind    string
 	}{
 		{"procedural:rain", false, "rain"},
-		{"procedural:brown", false, "brown"},
-		{"procedural:white", false, "white"},
+		{"procedural:brown", true, ""},
+		{"procedural:white", true, ""},
 		{"procedural:bogus", true, ""},
 	}
 	for _, tc := range cases {
