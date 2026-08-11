@@ -60,6 +60,13 @@ func TestManifestSchema_LoadsFromDisk(t *testing.T) {
 // "VERIFIED" requires a later observation report from a
 // non-blocked network; the loader already routes these tracks
 // under "Unverified licenses" in the TUI (REQ-ATT-3).
+//
+// Phase 1.4 of slice-2 #4782: subdirs (track-001/, track-002/,
+// track-003/) will be added in PR-A. When that PR lands the
+// assertions below must be extended to also confirm every track
+// listed in manifest.json has a populated sibling subdir on disk
+// (no orphan directories, no manifest entries without bytes).
+// Until PR-A lands the seed is manifest.json only.
 func TestManifestSchema_TrackSampleHasNeedConfirmation(t *testing.T) {
 	path := v1ManifestPath(t)
 	data, err := os.ReadFile(path)
