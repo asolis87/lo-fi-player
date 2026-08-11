@@ -10,23 +10,30 @@ player runs offline.
 
 ## Status
 
-This repository is in **bootstrap**. PR #0 establishes the
-stack-agnostic repository metadata (this file, `CONTRIBUTING.md`,
-`.gitignore`, and a CI workflow stub). The Go module, the ports, the
-audio adapters, and the catalog all land in later chained PRs.
+The chained PR plan that built slice #1 is **shipped**: PR #0 through
+PR #11 are merged into `feat/lo-fi-player`, CI is green, and the
+binary builds and tests clean. The repository is no longer in
+bootstrap.
 
 | Area | Status |
 | --- | --- |
-| Repository metadata | PR #0 (this commit chain) |
-| Go module + `cmd/lofi` skeleton | PR #1 |
-| `AudioBackend` port + mpv adapter | PR #1, PR #3 |
-| Catalog loader + first-run fetch | PR #5, PR #6 |
-| TUI views (Bubble Tea) | PR #8 |
-| CLI credits + dispatcher | PR #7, PR #9 |
-| Catalog seed (`catalog/v1/`) + `LICENSE` | PR #10 *(gated — MIT vs Apache-2.0 unresolved)* |
+| Repository metadata + CI | shipped (PR #0) |
+| Go module + `cmd/lofi` skeleton + `AudioBackend` port | shipped (PR #1) |
+| XDG-aware atomic TOML config | shipped (PR #2) |
+| mpv JSON-IPC adapter (primary backend) | shipped (PR #3) |
+| Pure-Go procedural fallback (`procedural:rain`) | shipped (PR #4) |
+| Catalog loader + streaming SHA-256 verify | shipped (PR #5) |
+| First-run fetch + transactional sync | shipped (PR #6) |
+| `lofi credits` CLI (NOTICE + `--json`) | shipped (PR #7) |
+| TUI views (Bubble Tea) wired to `lofi play` | shipped (PR #8) |
+| CLI dispatch + headless `lofi play <id-or-station>` | shipped (PR #9) |
+| `catalog/v1/` seed + `LICENSE` (MIT) | shipped (PR #10) |
 
-Until PR #1 lands, `go test ./...` and `go build ./...` fail with
-a clear "no main module" message. That is expected.
+The bundled `catalog/v1/` is a **placeholder seed**: every track ships
+with `license_status: "NEEDS CONFIRMATION"` and a zero SHA-256 until
+the audio bytes are audited and committed. Promotion to `VERIFIED`
+requires a signed verification report — `lofi sync` will refuse the
+seed as-is.
 
 ## Why this exists
 
@@ -38,29 +45,61 @@ and attribution. `lo-fi-player` fills the gap with a terminal-native
 player that ships its own catalog, surfaces attribution inline, and
 stays inside the keyboard-first workflow.
 
-## Repository layout (planned)
+## Subcommands
 
-```text
-cmd/lofi/          composition root and CLI dispatcher (PR #1)
-internal/tui/      Bubble Tea model, views, keymap (PR #8)
-internal/audio/    AudioBackend port + mpv + oto adapters (PR #1, #3, #4)
-internal/catalog/  loader, checksum, SHA-pinned fetch (PR #5, #6)
-internal/config/   XDG-aware atomic TOML store (PR #2)
-catalog/v1/        versioned, license-clean track tree (PR #10, gated)
-.github/workflows/ CI pipeline (this PR)
 ```
+lofi play [track|procedural:station]
+lofi list
+lofi credits [--json]
+lofi sync
+```
+
+- `lofi play` — opens the TUI (track browser, now-playing, queue, and
+  attribution views; press `?` inside for the keymap).
+- `lofi play <track-id>` — plays a single track headlessly and exits
+  when the track ends.
+- `lofi play procedural:rain` — plays the pure-Go procedural
+  ambient-rain station headlessly. This is the offline fallback: it
+  needs no `mpv`, no audio file, and no network.
+- `lofi list` — prints the local catalog as a table (or `--json` for
+  the raw manifest).
+- `lofi credits` — prints the per-track attribution NOTICE block, or
+  `--json` for the same data structured.
+- `lofi sync` — fetches the SHA-pinned manifest from the
+  catalog source and applies it atomically into the local store.
+
+Unknown subcommands and `lofi --help` print the usage block above and
+exit with code 2.
 
 ## Quick start
 
-There is nothing to run yet. Once PR #1 ships:
-
 ```bash
-go build ./cmd/lofi
-./lofi --help
+go build -o lofi ./cmd/lofi
+./lofi sync      # one-time: fetch the SHA-pinned catalog
+./lofi play      # open the TUI
+./lofi list      # or browse the catalog from the shell
+./lofi credits   # or inspect attribution from the shell
 ```
 
-The expected first-run flow is `lofi play` (cold-start to first
-audible playback under two seconds, offline after the first fetch).
+If `mpv` is not installed, `lofi play procedural:rain` still works —
+`audio.Select()` falls through to the pure-Go procedural backend
+instead of failing.
+
+## Repository layout
+
+```text
+cmd/lofi/           composition root, CLI dispatcher, subcommand wiring
+internal/tui/       Bubble Tea model, four views, keymap
+internal/audio/     AudioBackend port + mpv adapter + procedural fallback
+internal/catalog/   Track schema, LoadFromDir, streaming SHA-256 verify, Syncer
+internal/config/    XDG-aware atomic TOML store with corruption recovery
+internal/credits/   NOTICE block renderer (text + --json)
+internal/license/   per-track license parsing and status classification
+internal/skeleton/  composition helpers used by the dispatcher
+catalog/v1/         versioned, license-clean track tree (placeholder seed)
+.github/workflows/  CI pipeline (go vet, go build, go test)
+LICENSE             MIT
+```
 
 ## Contributing
 
@@ -69,25 +108,12 @@ request. It covers the branch naming convention, the
 Conventional Commits format, the commit-by-work-unit rule, and the
 PR chain strategy.
 
-## Documentation
-
-Design notes, spec delta, and the chained-PR plan live in the
-project's spec-driven change (`sdd/lo-fi-player`). For slice #1 the
-authoritative artefacts are:
-
-- `sdd/lo-fi-player/proposal` — problem, users, scope, success metrics
-- `sdd/lo-fi-player/spec` — requirements, scenarios, embedded contracts
-- `sdd/lo-fi-player/design` — module architecture, threat matrix
-- `sdd/lo-fi-player/tasks` — chained PR decomposition
-
 ## License
 
-The repository license is **deferred to Phase 6** (PR #10). MIT is
-the recommended default pending explicit approval, but no `LICENSE`
-file ships with PR #0 so the maintainer can choose between MIT and
-Apache-2.0 without a rewrite. Per-track licenses in the bundled
-catalog remain independent and are always surfaced in the
-attribution view.
+The repository is licensed under **MIT**. See [`LICENSE`](./LICENSE).
+Per-track licenses in the bundled catalog are surfaced through
+`lofi credits` and the TUI attribution view and remain independent
+of the repository license.
 
 ## Acknowledgments
 
@@ -95,6 +121,4 @@ attribution view.
   (license claims flagged `NEEDS CONFIRMATION` until re-verified
   from an unrestricted network).
 - `mpv` — JSON-IPC audio backend.
-- `oto/v3` — pure-Go audio backend for the `procedural:rain`
-  fallback station.
 - Bubble Tea, Lip Gloss, and the Charmbracelet ecosystem — TUI.
