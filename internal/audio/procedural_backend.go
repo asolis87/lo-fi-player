@@ -1,20 +1,14 @@
 package audio
 
 import (
+	"context"
 	"sync"
+	"time"
 )
 
 // ProceduralBackend is the AudioBackend adapter that drives a
-// SampleGenerator through a fixed-size ring buffer. It is the
-// "ambient noise" fallback used when mpv is unavailable; the
-// generator is fully deterministic so the buffer can be replayed
-// identically from any process given the same seed and Track id.
-//
-// The ring buffer holds exactly bufferSize int16 samples. A
-// consumer (real audio device in production, tests here via the
-// pullSamples hook) drains samples and the backend refills from
-// the wrapped generator on demand. Close releases every resource
-// and is safe to call repeatedly.
+// SampleGenerator through a fixed-size ring buffer and a pump
+// goroutine that drains the buffer at wall-clock rate.
 type ProceduralBackend struct {
 	gen        SampleGenerator
 	sampleRate int
@@ -30,6 +24,11 @@ type ProceduralBackend struct {
 	volume  int
 	closed  bool
 	pos     int // samples drained since last Load/Seek
+
+	device     Device // audio sink; nil → defaultDeviceFactory on Play
+	pumpCtx    context.Context
+	pumpCancel context.CancelFunc
+	pumpDone   chan struct{}
 }
 
 // ProceduralOption configures a ProceduralBackend.
@@ -71,12 +70,14 @@ func WithSampleRate(sr int) ProceduralOption {
 const defaultProceduralBufferSize = 8192
 
 // NewProceduralBackend constructs a backend wrapping gen. The
-// generator MUST be non-nil; passing nil returns nil so callers
-// fail loud at construction time instead of panicking at play.
+// generator MUST be non-nil; passing nil returns nil. Default
+// volume is 100 so the procedural fallback plays audio out of
+// the box.
 func NewProceduralBackend(opts ...ProceduralOption) *ProceduralBackend {
 	b := &ProceduralBackend{
 		sampleRate: 44100,
 		bufferSize: defaultProceduralBufferSize,
+		volume:     100,
 	}
 	for _, opt := range opts {
 		opt(b)
@@ -100,7 +101,7 @@ func (b *ProceduralBackend) BufferSize() int { return b.bufferSize }
 func (b *ProceduralBackend) SampleRate() int { return b.sampleRate }
 
 // Volume returns the most recently set volume level after range
-// validation. 0 means muted; the default before any SetVolume is 0.
+// validation. Default is 100 (full scale).
 func (b *ProceduralBackend) Volume() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -127,53 +128,64 @@ func (b *ProceduralBackend) Load(t Track) error {
 }
 
 // Play starts or resumes playback. The ring buffer is filled
-// eagerly so a consumer never blocks on the first read; the
-// generator continues to refill on demand.
+// eagerly so the pump goroutine never blocks on the first read.
 func (b *ProceduralBackend) Play() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed {
+		b.mu.Unlock()
 		return ErrBackendUnavailable
 	}
 	if !b.loaded {
+		b.mu.Unlock()
 		return ErrBackendUnavailable
 	}
+	if b.device == nil {
+		b.device = defaultDeviceFactory(b.sampleRate)
+	}
+	device := b.device
 	b.fillLocked(b.bufferSize)
+	b.stopPumpLocked()
+	pumpCtx, pumpCancel := context.WithCancel(context.Background())
+	b.pumpCtx = pumpCtx
+	b.pumpCancel = pumpCancel
+	b.pumpDone = make(chan struct{})
 	b.playing = true
+	go b.pump(pumpCtx, b.pumpDone, device)
+	b.mu.Unlock()
 	return nil
 }
 
-// Pause suspends playback without unloading the generator or
-// clearing the buffer. State() will report playing=false until
-// Play() is called again.
+// Pause suspends playback. The pump goroutine is signalled to
+// stop so the device stops receiving samples.
 func (b *ProceduralBackend) Pause() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed {
+		b.mu.Unlock()
 		return ErrBackendUnavailable
 	}
 	b.playing = false
+	b.stopPumpLocked()
+	b.mu.Unlock()
 	return nil
 }
 
-// Stop halts playback and rewinds to the start. The ring buffer
-// is cleared; the next Play() will refill from the generator's
-// beginning.
+// Stop halts playback and rewinds to the start.
 func (b *ProceduralBackend) Stop() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed {
+		b.mu.Unlock()
 		return ErrBackendUnavailable
 	}
 	b.playing = false
 	b.head, b.tail, b.size, b.pos = 0, 0, 0, 0
 	b.gen.Reset()
+	b.stopPumpLocked()
+	b.mu.Unlock()
 	return nil
 }
 
-// SetVolume sets the playback level. Values outside [0, 100] are
-// rejected with ErrVolumeOutOfRange so callers can match on
-// errors.Is and mirror MpvBackend's contract.
+// SetVolume sets the playback level. The pump goroutine reads
+// b.volume on every chunk so updates take effect next iteration.
 func (b *ProceduralBackend) SetVolume(v int) error {
 	if v < 0 || v > 100 {
 		return ErrVolumeOutOfRange
@@ -187,21 +199,34 @@ func (b *ProceduralBackend) SetVolume(v int) error {
 	return nil
 }
 
-// Seek jumps to an absolute position in milliseconds. The
-// internal sample counter is reset to the equivalent sample
-// index; the ring buffer itself is not modified, so the next
-// consumer pull will continue from the new logical position.
+// Seek jumps to an absolute position in milliseconds.
 func (b *ProceduralBackend) Seek(ms int) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed {
+		b.mu.Unlock()
 		return ErrBackendUnavailable
 	}
 	if ms < 0 {
 		ms = 0
 	}
 	b.pos = ms * b.sampleRate / 1000
+	b.stopPumpLocked()
+	b.mu.Unlock()
 	return nil
+}
+
+// stopPumpLocked cancels the pump goroutine and waits for it to
+// exit. Caller MUST hold b.mu.
+func (b *ProceduralBackend) stopPumpLocked() {
+	pumpCancel := b.pumpCancel
+	pumpDone := b.pumpDone
+	b.pumpCancel = nil
+	b.pumpCtx = nil
+	b.pumpDone = nil
+	if pumpCancel != nil {
+		pumpCancel()
+		<-pumpDone
+	}
 }
 
 // State reports whether the backend is currently playing and the
@@ -219,19 +244,25 @@ func (b *ProceduralBackend) State() (bool, int, error) {
 	return b.playing, posMS, nil
 }
 
-// Close permanently shuts the backend down. Subsequent calls
-// return ErrBackendUnavailable. Close is idempotent: a second
+// Close permanently shuts the backend down. Idempotent: a second
 // call is a no-op that returns nil so callers can defer it
 // without worrying about double-close from cleanup paths.
 func (b *ProceduralBackend) Close() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed {
+		b.mu.Unlock()
 		return nil
 	}
 	b.closed = true
 	b.playing = false
 	b.head, b.tail, b.size = 0, 0, 0
+	b.stopPumpLocked()
+	device := b.device
+	b.device = nil
+	b.mu.Unlock()
+	if device != nil {
+		_ = device.Close()
+	}
 	return nil
 }
 
@@ -243,6 +274,11 @@ func (b *ProceduralBackend) Close() error {
 func (b *ProceduralBackend) pullSamples(n int) []int16 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.pullSamplesLocked(n)
+}
+
+// pullSamplesLocked assumes b.mu is held.
+func (b *ProceduralBackend) pullSamplesLocked(n int) []int16 {
 	if b.closed || n <= 0 {
 		return nil
 	}
@@ -251,9 +287,6 @@ func (b *ProceduralBackend) pullSamples(n int) []int16 {
 		if b.size == 0 {
 			b.fillLocked(b.bufferSize)
 			if b.size == 0 {
-				// Generator exhausted (should not happen for
-				// our infinite-sample procedural sources, but
-				// defend anyway): emit silence.
 				out[i] = 0
 				continue
 			}
@@ -265,6 +298,60 @@ func (b *ProceduralBackend) pullSamples(n int) []int16 {
 	}
 	return out
 }
+
+// pump drives the device. Pulls chunks from the ring buffer,
+// applies the current volume, forwards to the device, and paces
+// itself to wall-clock via a timer-aware select against the
+// cancel context.
+func (b *ProceduralBackend) pump(ctx context.Context, done chan struct{}, device Device) {
+	defer close(done)
+	chunkDur := time.Duration(pumpChunkSize) * time.Second / time.Duration(b.sampleRate)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		b.mu.Lock()
+		vol := b.volume
+		samples := b.pullSamplesLocked(pumpChunkSize)
+		b.mu.Unlock()
+		if len(samples) > 0 {
+			_ = device.Write(applyVolume(samples, vol))
+		}
+		t := time.NewTimer(chunkDur)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func applyVolume(buf []int16, vol int) []int16 {
+	if vol >= 100 {
+		return buf
+	}
+	out := make([]int16, len(buf))
+	gain := float64(vol) / 100.0
+	for i, s := range buf {
+		v := float64(s) * gain
+		if v >= float64(maxInt16) {
+			out[i] = maxInt16
+		} else if v <= float64(minInt16) {
+			out[i] = minInt16
+		} else {
+			out[i] = int16(v)
+		}
+	}
+	return out
+}
+
+const (
+	maxInt16 = int16(^uint16(0) >> 1)
+	minInt16 = -maxInt16 - 1
+)
 
 // fillLocked draws count samples from the generator and writes
 // them into the ring buffer, wrapping around as needed. Caller

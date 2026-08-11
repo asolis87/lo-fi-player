@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/asolis87/lo-fi-player/internal/audio"
 	"github.com/asolis87/lo-fi-player/internal/catalog"
@@ -72,23 +74,16 @@ func TestPlay_HeadlessUnknownIDExits1(t *testing.T) {
 	}
 }
 
-// TestPlay_HeadlessProceduralStation guards the procedural path
-// for the only station exposed in slice #1: `lofi play
-// procedural:rain` MUST build a ProceduralBackend with a
-// *audio.RainGenerator and play it through the AudioBackend port
-// without touching audio.Select. This is the headless fallback
-// the spec calls for when no shipped track is wanted.
-//
-// Per Decision #326, the slice-1 CLI surface only exposes
-// procedural:rain. procedural:brown and procedural:white are still
-// available inside internal/audio (the generators exist and the
-// type assertions below document that), but they are rejected by
-// runPlay with an actionable stderr message and exit code 1. The
-// dedicated rejection tests live in TestPlay_HeadlessProceduralBrownRejects
-// and TestPlay_HeadlessProceduralWhiteRejects.
-func TestPlay_HeadlessProceduralStation(t *testing.T) {
-	stubWaitForSignal(t)
-
+// TestPlay_HeadlessProceduralRainWritesAudioToDevice replaces
+// the previous TestPlay_HeadlessProceduralStation, which only
+// asserted "no error" from runPlay and therefore would have
+// passed even when the procedural backend was silent (the
+// pre-PR-14 bug). The new test reconstructs the same backend
+// runPlay builds for `lofi play procedural:rain` and threads a
+// fake Device through WithDevice so the assertion can verify
+// the pump actually delivered samples to a sink — without
+// touching the immutable play.go.
+func TestPlay_HeadlessProceduralRainWritesAudioToDevice(t *testing.T) {
 	gen := resolveProcedural("procedural:rain")
 	if gen == nil {
 		t.Fatalf("resolveProcedural(procedural:rain) = nil")
@@ -97,11 +92,34 @@ func TestPlay_HeadlessProceduralStation(t *testing.T) {
 		t.Fatalf("resolveProcedural(procedural:rain) = %T, want *audio.RainGenerator", gen)
 	}
 
-	// End-to-end through runPlay so the full wiring (procedural
-	// prefix detection, backend construction, Load, Play,
-	// signal-wait stub, Close) is exercised.
-	if err := runPlay([]string{"procedural:rain"}); err != nil {
-		t.Fatalf("runPlay(procedural:rain): %v", err)
+	dev := newRecordingDevice()
+	b := audio.NewProceduralBackend(
+		audio.WithGenerator(gen),
+		audio.WithSampleRate(44100),
+		audio.WithDevice(dev),
+	)
+	if b == nil {
+		t.Fatal("NewProceduralBackend returned nil")
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	if err := b.Load(audio.Track{ID: "procedural:rain", Path: "procedural:rain"}); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := b.Play(); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for dev.sampleCount() < 2048 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := b.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if got := dev.sampleCount(); got < 2048 {
+		t.Fatalf("procedural:rain delivered %d samples to the device, want >= 2048 (the silence bug)", got)
 	}
 }
 
@@ -299,3 +317,19 @@ func TestResolveProcedural_KnownStations(t *testing.T) {
 		})
 	}
 }
+
+// recordingDevice is the test-only Device the procedural CLI
+// tests use to verify the pump actually delivered samples. It
+// lives in the cmd/lofi package (not internal/audio) because the
+// fakeDevice there is package-private; the interface matches
+// audio.Device so the procedural backend can use it through
+// WithDevice.
+type recordingDevice struct {
+	mu      sync.Mutex
+	written []int16
+}
+
+func newRecordingDevice() *recordingDevice        { return &recordingDevice{} }
+func (r *recordingDevice) Write(s []int16) error  { r.mu.Lock(); defer r.mu.Unlock(); r.written = append(r.written, s...); return nil }
+func (r *recordingDevice) Close() error           { return nil }
+func (r *recordingDevice) sampleCount() int       { r.mu.Lock(); defer r.mu.Unlock(); return len(r.written) }
