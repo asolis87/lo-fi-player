@@ -41,6 +41,9 @@ func writeListCatalog(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "track.json"), data, 0o644); err != nil {
 			t.Fatalf("write %s: %v", id, err)
 		}
+		if err := os.WriteFile(filepath.Join(dir, "audio.mp3"), []byte("dummy bytes"), 0o644); err != nil {
+			t.Fatalf("write audio.mp3 for %s: %v", id, err)
+		}
 	}
 }
 

@@ -23,6 +23,9 @@ func writeCreditsCatalog(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "track.json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "audio.mp3"), []byte("dummy bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestCredits_Default_PrintsNotice(t *testing.T) {
