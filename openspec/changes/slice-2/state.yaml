@@ -1,0 +1,52 @@
+change: slice-2
+title: "Slice #2 — catalog seed audit (real audio, signed verification, baked SHA)"
+created: 2026-08-11
+status: exploring
+session_preflight:
+  pace: interactive
+  artifact_store: hybrid
+  delivery_strategy: ask-on-risk
+  review_budget_lines: 400
+
+phases:
+  - id: explore
+    status: complete
+    artifact: openspec/changes/slice-2/exploration.md
+    memory_ref: sdd/slice-2/explore  # Engram topic key mirror
+  - id: propose
+    status: pending
+    artifact: openspec/changes/slice-2/proposal.md
+    memory_ref: sdd/slice-2/proposal  # Engram topic key mirror (hybrid writes both)
+    blocked_by: []
+  - id: spec
+    status: blocked
+    artifact: openspec/changes/slice-2/specs/catalog/spec.md
+    blocked_by: [propose]
+  - id: design
+    status: blocked
+    artifact: openspec/changes/slice-2/design.md
+    blocked_by: [propose]
+  - id: tasks
+    status: blocked
+    artifact: openspec/changes/slice-2/tasks.md
+    blocked_by: [propose, spec, design]
+  - id: apply
+    status: blocked
+    blocked_by: [tasks]
+  - id: verify
+    status: blocked
+    blocked_by: [apply]
+  - id: archive
+    status: blocked
+    blocked_by: [verify]
+
+resolutions:
+  - question: "License-verification host availability"
+    answer: "User has a non-sandbox host and will sign verification reports there"
+    resolved_in: memory sdd/slice-2/explore
+  - question: "Release pipeline (SHA baking)"
+    answer: "GitHub Action automated, replaces <PLACEHOLDER_SHA> in internal/catalog/pinning.go:30 via -ldflags -X"
+    resolved_in: memory sdd/lo-fi-player/session-summary  # obs #4783
+  - question: "Schema/loader drift fix"
+    answer: "Reestructurar seed a <id>/track.json subdirs; mantener LoadFromDir como runtime default; agregar AudioFilename al struct Track"
+    resolved_in: memory sdd/lo-fi-player/session-summary  # obs #4783
