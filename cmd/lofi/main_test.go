@@ -49,8 +49,8 @@ func TestRun_UnknownSubcommandExitsTwoWithUsage(t *testing.T) {
 	}
 }
 
-func TestRun_KnownSubcommandsExitZero(t *testing.T) {
-	for _, sub := range []string{"play", "list", "credits", "sync"} {
+func TestRun_KnownPlaceholderSubcommandsExitZero(t *testing.T) {
+	for _, sub := range []string{"play", "list", "sync"} {
 		if code, _ := captureStderr(t, func() int { return run([]string{sub}) }); code != 0 {
 			t.Errorf("run([%q]) exit code = %d, want 0", sub, code)
 		}
