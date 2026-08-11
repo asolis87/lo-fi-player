@@ -26,7 +26,10 @@ func stubWaitForSignal(t *testing.T) {
 }
 
 // writeHeadlessCatalog seeds a single track-rain/track.json under
-// the test's XDG cache root so the "unknown id" path can run.
+// the test's XDG cache root so the "unknown id" path can run. The
+// audio.mp3 sibling is the deterministic payload the checksum
+// expects so PR-D #3.1 (audio.mp3 required) and PR-D #3.2
+// (checksum verified at load) both stay green.
 func writeHeadlessCatalog(t *testing.T) {
 	t.Helper()
 	dir := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "lofi-player", "catalog", "v1", "track-rain")
@@ -41,7 +44,7 @@ func writeHeadlessCatalog(t *testing.T) {
 		License:         catalog.LicenseCCBY,
 		LicenseStatus:   catalog.LicenseStatusVerified,
 		SourceURL:       "https://example.test/track-rain",
-		ChecksumSHA256:  "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
+		ChecksumSHA256:  "ebc2689f897aa333887187a499a15658989ca923cbd49ecc8080b6eef955cdc6",
 		AttributionText: "by Anonymous",
 		DurationSeconds: 60,
 		AudioFilename:   "audio.mp3",
@@ -52,6 +55,9 @@ func writeHeadlessCatalog(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "track.json"), data, 0o644); err != nil {
 		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "audio.mp3"), []byte("dummy bytes"), 0o644); err != nil {
+		t.Fatalf("write audio.mp3: %v", err)
 	}
 }
 
