@@ -1,0 +1,125 @@
+// Package tui hosts the Bubble Tea program that drives the lo-fi
+// player's interactive mode. It owns the keymap, the four views
+// (Now-Playing, Queue, Catalog, Attribution), and the non-fatal
+// error banner triggered by audio backend events.
+//
+// The package imports only the AudioBackend port (internal/audio)
+// and the catalog types (internal/catalog); it never reaches into
+// concrete adapters. The composition root (cmd/lofi) wires the
+// real backend and catalog before handing the Model to
+// tea.NewProgram.
+package tui
+
+import (
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/asolis87/lo-fi-player/internal/audio"
+	"github.com/asolis87/lo-fi-player/internal/catalog"
+)
+
+// Mode identifies the four REQ-TUI-1 screens the user can switch
+// between with single keys (p, q, c, a). The name is "Mode" rather
+// than "View" because the Bubble Tea interface already exposes a
+// View() method on the root model; colliding identifiers trigger
+// Go compile errors.
+type Mode int
+
+const (
+	// ModeNowPlaying is the default landing view; it surfaces the
+	// playback controls and the non-fatal crash banner.
+	ModeNowPlaying Mode = iota
+	// ModeQueue shows the upcoming track list ordered like the catalog.
+	ModeQueue
+	// ModeCatalog lists every track grouped by license status.
+	ModeCatalog
+	// ModeAttribution renders the five REQ-ATT-2 fields for the
+	// currently selected track.
+	ModeAttribution
+)
+
+// defaultVolume is the slice-#1 starting volume. It matches the
+// spec's mid-point (S-AUD-2 keeps volume above 0 and below 100).
+const defaultVolume = 50
+
+// volumeStep is how many percentage points + and - change the
+// volume by per keypress.
+const volumeStep = 5
+
+// Model is the Bubble Tea root state. It owns the backend port,
+// the catalog pointer, the current view, the selected track index,
+// the cached volume level, the latest non-fatal error message, and
+// the audio Event channel the composition root feeds asynchronously.
+// SelectedIdx and Playing are not surfaced to the user yet (PR #8
+// covers structure only); they exist so future work units can add
+// track-aware navigation without changing the model surface.
+type Model struct {
+	Backend     audio.AudioBackend
+	Catalog     *catalog.Catalog
+	Mode        Mode
+	SelectedIdx int
+	Volume      int
+	LastError   string
+	ErrCh       chan audio.Event
+	Playing     bool
+}
+
+// NewModel builds a fresh Model with the default mode, volume, and
+// no error. The backend and catalog are stored as-is so the TUI can
+// reach into them on every keypress. ErrCh may be nil — the Model
+// treats a nil channel as "no async event source".
+func NewModel(backend audio.AudioBackend, cat *catalog.Catalog, errCh chan audio.Event) Model {
+	return Model{
+		Backend: backend,
+		Catalog: cat,
+		Mode:    ModeNowPlaying,
+		Volume:  defaultVolume,
+		ErrCh:   errCh,
+	}
+}
+
+// Init returns a no-op initial command. The TUI has no startup
+// I/O beyond what the composition root has already wired (the
+// backend subprocess and the optional first-run fetch). Future
+// work units can return tea.Tick or a listen-on-ErrCh command here.
+func (m Model) Init() tea.Cmd { return nil }
+
+// Update is the Bubble Tea Update protocol entry point. It dispatches
+// keys to the keymap and accepts audio.Event values to surface a
+// non-fatal banner via LastError (S-TUI-2). Unknown messages are
+// silently ignored to keep the TUI deterministic.
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		action, ok := bindingFor(msg)
+		if !ok {
+			return m, nil
+		}
+		return m.applyAction(action)
+	case audio.Event:
+		if msg.Type == audio.EventError {
+			m.LastError = msg.Message
+		}
+		return m, nil
+	case tea.WindowSizeMsg:
+		// No responsive layout in slice #1; keep the rendered text
+		// static so the QUIT/keypress contract stays deterministic.
+		return m, nil
+	}
+	return m, nil
+}
+
+// View delegates to the per-mode renderer. A non-fatal error banner
+// is appended in the dispatcher so individual modes stay focused
+// on their subject matter.
+func (m Model) View() string {
+	switch m.Mode {
+	case ModeQueue:
+		return viewQueue(m)
+	case ModeCatalog:
+		return viewCatalog(m)
+	case ModeAttribution:
+		return viewAttribution(m)
+	default:
+		return viewNowPlaying(m)
+	}
+}
