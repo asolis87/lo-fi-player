@@ -6,6 +6,7 @@ name: ci
 # `go test` / `go build` steps will fail with a clear "no main module"
 # message until PR #1 introduces `go.mod`. Once the module is in place,
 # the same workflow becomes the canonical CI gate for every chained PR.
+# PR #1 adds Go module + build cache so chained PRs rebuild incrementally.
 
 on:
   push:
@@ -31,6 +32,16 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.22"
+          # cache: true is a no-op when no Go module exists, so the
+          # workflow stays safe for the stack-agnostic bootstrap path.
+          cache: true
+
+      - name: cache Go build cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          restore-keys: ${{ runner.os }}-go-build-
 
       - name: go vet
         run: go vet ./...
