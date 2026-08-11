@@ -61,6 +61,7 @@ type Track struct {
 	ChecksumSHA256  string        `json:"checksum_sha256"`
 	AttributionText string        `json:"attribution_text"`
 	DurationSeconds int           `json:"duration_seconds"`
+	AudioFilename   string        `json:"audio_filename"`
 }
 
 // Catalog is the root document LoadFromDir returns. Tracks are

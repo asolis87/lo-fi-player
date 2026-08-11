@@ -19,6 +19,7 @@ func validTrack() Track {
 		ChecksumSHA256:  "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
 		AttributionText: `"Slow Rain on a Tin Roof" by Anonymous, licensed CC-BY-4.0. Source: archive.org/ia-drizzle`,
 		DurationSeconds: 217,
+		AudioFilename:   "audio.mp3",
 	}
 }
 
