@@ -1,0 +1,45 @@
+name: ci
+
+# Workflow stub for the lo-fi-player repository.
+#
+# PR #0 ships this file as a *contract* for the upcoming Go pipeline. The
+# `go test` / `go build` steps will fail with a clear "no main module"
+# message until PR #1 introduces `go.mod`. Once the module is in place,
+# the same workflow becomes the canonical CI gate for every chained PR.
+
+on:
+  push:
+    branches:
+      - feat/lo-fi-player
+      - feat/pr-*
+  pull_request:
+    branches:
+      - feat/lo-fi-player
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: go vet
+        run: go vet ./...
+        # `go vet ./...` is intentionally present even though PR #0 ships
+        # without a Go module: it pins the expected analyzer behaviour
+        # so PR #1 cannot accidentally relax vet rules.
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        run: go test ./...
