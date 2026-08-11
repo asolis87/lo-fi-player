@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -60,5 +61,26 @@ func TestTrack_Validate_RejectsUnknownSchemaVersion(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "schema_version") {
 		t.Fatalf("error %q lacks schema_version context", err.Error())
+	}
+}
+
+// TestTrack_Validate_RejectsEmptyAudioFilename is the PR-D #1.2
+// gate: a Track whose AudioFilename is empty MUST be rejected so
+// the loader can assume every track it accepts names the audio
+// bytes it has to verify. The error MUST wrap ErrInvalidTrack so
+// callers match the class via errors.Is while the message keeps
+// the offending field name.
+func TestTrack_Validate_RejectsEmptyAudioFilename(t *testing.T) {
+	tr := validTrack()
+	tr.AudioFilename = ""
+	err := tr.Validate()
+	if err == nil {
+		t.Fatal("Validate(empty audio_filename) = nil, want error")
+	}
+	if !errors.Is(err, ErrInvalidTrack) {
+		t.Fatalf("Validate(empty audio_filename) = %v, want ErrInvalidTrack", err)
+	}
+	if !strings.Contains(err.Error(), "audio_filename") {
+		t.Fatalf("error %q lacks audio_filename context", err.Error())
 	}
 }
