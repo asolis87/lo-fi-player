@@ -10,10 +10,11 @@ player runs offline.
 
 ## Status
 
-The chained PR plan that built slice #1 is **shipped**: PR #0 through
-PR #11 are merged into `feat/lo-fi-player`, CI is green, and the
-binary builds and tests clean. The repository is no longer in
-bootstrap.
+The slice #1 chain is **shipped**: the 11 work units in the
+chained-PR plan are merged. Post-slice-1 follow-ups PR #12 (README
+rewrite) and PR #14 (re-admits `oto/v3` so the procedural fallback
+actually emits sound) are also merged. CI is green, and the binary
+builds and tests clean. The repository is no longer in bootstrap.
 
 | Area | Status |
 | --- | --- |
@@ -21,7 +22,7 @@ bootstrap.
 | Go module + `cmd/lofi` skeleton + `AudioBackend` port | shipped (PR #1) |
 | XDG-aware atomic TOML config | shipped (PR #2) |
 | mpv JSON-IPC adapter (primary backend) | shipped (PR #3) |
-| Pure-Go procedural fallback (`procedural:rain`) | shipped (PR #4) |
+| Procedural fallback (`procedural:rain`) + `oto/v3` device sink | shipped (PR #4, #14) |
 | Catalog loader + streaming SHA-256 verify | shipped (PR #5) |
 | First-run fetch + transactional sync | shipped (PR #6) |
 | `lofi credits` CLI (NOTICE + `--json`) | shipped (PR #7) |
@@ -65,9 +66,12 @@ lofi sync
   attribution views; press `?` inside for the keymap).
 - `lofi play <track-id>` — plays a single track headlessly and exits
   when the track ends.
-- `lofi play procedural:rain` — plays the pure-Go procedural
-  ambient-rain station headlessly. This is the offline fallback: it
-  needs no `mpv`, no audio file, and no network.
+- `lofi play procedural:rain` — plays the ambient-rain station
+  headlessly. The procedural backend generates samples in a Go-side
+  ring buffer that a pump goroutine drains into the system audio
+  device via `oto/v3` (ALSA on Linux, CoreAudio on macOS). This is
+  the offline fallback: it needs no `mpv`, no audio file, and no
+  network, but it does require a working audio device on the host.
 - `lofi list` — prints the local catalog as a table (or `--json` for
   the raw manifest).
 - `lofi credits` — prints the per-track attribution NOTICE block, or
@@ -88,9 +92,13 @@ go build -o lofi ./cmd/lofi
 ./lofi credits   # or inspect attribution from the shell
 ```
 
-If `mpv` is not installed, `lofi play procedural:rain` still works —
-`audio.Select()` falls through to the pure-Go procedural backend
-instead of failing.
+If `mpv` is not installed, `lofi play procedural:rain` still works
+through the procedural backend (it does not go through `audio.Select`,
+so a missing `mpv` is irrelevant). On Linux the build needs
+`libasound2-dev` and `pkg-config` for the `oto/v3` cgo binding (see
+`.github/workflows/ci.yml`); on a host with no working audio device
+the procedural backend falls through to a no-op sink so the binary
+still runs without crashing.
 
 ## Repository layout
 
@@ -127,5 +135,8 @@ of the repository license.
 - Internet Archive — likely source for the bundled CC0/CC-BY catalog
   (license claims flagged `NEEDS CONFIRMATION` until re-verified
   from an unrestricted network).
-- `mpv` — JSON-IPC audio backend.
+- `mpv` — JSON-IPC audio backend for catalog tracks.
+- `oto/v3` — cgo-backed audio output sink for the procedural
+  fallback. Requires ALSA development headers at build time on
+  Linux (see `.github/workflows/ci.yml`).
 - Bubble Tea, Lip Gloss, and the Charmbracelet ecosystem — TUI.
