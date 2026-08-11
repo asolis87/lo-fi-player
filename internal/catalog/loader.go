@@ -60,6 +60,9 @@ func LoadFromDir(root string) (*Catalog, error) {
 		if err := tr.Validate(); err != nil {
 			return nil, fmt.Errorf("catalog: invalid track id=%q in %s: %w", tr.ID, jsonPath, err)
 		}
+		if err := Verify(audioPath, tr.ChecksumSHA256); err != nil {
+			return nil, fmt.Errorf("catalog: checksum mismatch for id=%q in %s: %w", tr.ID, subdir, err)
+		}
 		tracks = append(tracks, tr)
 	}
 	sort.Slice(tracks, func(i, j int) bool { return tracks[i].ID < tracks[j].ID })

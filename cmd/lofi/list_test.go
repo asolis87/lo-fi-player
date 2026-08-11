@@ -29,7 +29,7 @@ func writeListCatalog(t *testing.T) {
 			License:         catalog.LicenseCCBY,
 			LicenseStatus:   catalog.LicenseStatusVerified,
 			SourceURL:       "https://example.test/" + id,
-			ChecksumSHA256:  "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
+			ChecksumSHA256:  "ebc2689f897aa333887187a499a15658989ca923cbd49ecc8080b6eef955cdc6",
 			AttributionText: "by Artist " + id,
 			DurationSeconds: 60,
 			AudioFilename:   "audio.mp3",

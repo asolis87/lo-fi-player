@@ -16,7 +16,7 @@ func writeCreditsCatalog(t *testing.T) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	data, err := json.Marshal(catalog.Track{SchemaVersion: 1, ID: "track", Title: "Track", Artist: "Artist", License: catalog.LicenseCC0, LicenseStatus: catalog.LicenseStatusVerified, SourceURL: "https://example.test", ChecksumSHA256: "abc", AttributionText: "Track by Artist", DurationSeconds: 1, AudioFilename: "audio.mp3"})
+	data, err := json.Marshal(catalog.Track{SchemaVersion: 1, ID: "track", Title: "Track", Artist: "Artist", License: catalog.LicenseCC0, LicenseStatus: catalog.LicenseStatusVerified, SourceURL: "https://example.test", ChecksumSHA256: "ebc2689f897aa333887187a499a15658989ca923cbd49ecc8080b6eef955cdc6", AttributionText: "Track by Artist", DurationSeconds: 1, AudioFilename: "audio.mp3"})
 	if err != nil {
 		t.Fatal(err)
 	}
