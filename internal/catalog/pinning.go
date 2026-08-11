@@ -21,7 +21,13 @@ const FirstRunFetchURLTemplate = "https://raw.githubusercontent.com/%s/%s/%s/cat
 // only remediation is a new release publishing the corrected SHA
 // (decision #289). The placeholder below is replaced by the
 // release pipeline when the catalog/v1/ seed lands in PR #10.
-const FirstRunCommitSHA = "<PLACEHOLDER_SHA>"
+//
+// Declared as a var (not const) so PR #9's runSync tests can
+// override the value with a valid SHA without spinning up an
+// httptest server just to satisfy URL validation. Production code
+// never reassigns this; the release pipeline writes the real SHA
+// into this same symbol.
+var FirstRunCommitSHA = "<PLACEHOLDER_SHA>"
 
 // ErrFloatRef is wrapped around every ValidateURL failure whose
 // root cause is a non-immutable ref (branch, tag, "latest") or a
