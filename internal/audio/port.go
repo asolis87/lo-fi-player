@@ -16,6 +16,14 @@ import "errors"
 // MUST return the same sentinel so callers can match on errors.Is.
 var ErrVolumeOutOfRange = errors.New("audio: volume out of range")
 
+// ErrBackendUnavailable is returned by every AudioBackend method
+// after the backend has entered a terminal failure state (closed,
+// process crashed beyond recovery, etc.) and by constructors when
+// the requested adapter cannot be initialised. It is the single
+// sentinel callers use to distinguish "the audio system is down"
+// from per-operation errors like ErrVolumeOutOfRange.
+var ErrBackendUnavailable = errors.New("audio: backend unavailable")
+
 // Track is the minimal descriptor the audio backend needs to load a
 // playable item. Adapters translate catalog.Track into audio.Track at
 // the boundary; the port never imports the catalog package.

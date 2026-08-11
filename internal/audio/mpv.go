@@ -21,8 +21,10 @@ import (
 )
 
 var (
-	ErrMpvNotFound       = errors.New("audio: mpv binary not found")
-	ErrBackendUnavailable = errors.New("audio: backend unavailable")
+	// ErrMpvNotFound is adapter-specific to the mpv backend and stays
+	// here. ErrBackendUnavailable is the port-level sentinel declared
+	// in port.go and shared across all AudioBackend implementations.
+	ErrMpvNotFound = errors.New("audio: mpv binary not found")
 )
 
 type EventType string
