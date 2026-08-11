@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,25 +9,6 @@ import (
 
 	"github.com/asolis87/lo-fi-player/internal/catalog"
 )
-
-func captureStdout(t *testing.T, fn func() error) (error, string) {
-	t.Helper()
-	orig := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stdout = w
-	var buf bytes.Buffer
-	done := make(chan struct{})
-	go func() { _, _ = io.Copy(&buf, r); close(done) }()
-	callErr := fn()
-	_ = w.Close()
-	<-done
-	_ = r.Close()
-	os.Stdout = orig
-	return callErr, buf.String()
-}
 
 func writeCreditsCatalog(t *testing.T) {
 	t.Helper()
