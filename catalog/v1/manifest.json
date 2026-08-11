@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "version": "v1",
+  "_placeholder_note": "Decision #326: every track carries license_status NEEDS CONFIRMATION and a 64-hex-zero checksum_sha256 until the audit is rerun from a non-blocked network. The audio_filename field points to bytes that are NOT yet committed; the hash will be replaced when the MP3 lands. Do not promote this seed to VERIFIED before that audit.",
+  "tracks": [
+    {
+      "schema_version": 1,
+      "id": "track-sample-001",
+      "title": "Sample Rainfall",
+      "artist": "Anonymous",
+      "license": "CC-BY",
+      "license_status": "NEEDS CONFIRMATION",
+      "source_url": "https://archive.org/details/lofi-player-sample-001",
+      "checksum_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "attribution_text": "\"Sample Rainfall\" by Anonymous, licensed CC-BY 4.0. Source: https://archive.org/details/lofi-player-sample-001",
+      "duration_seconds": 180,
+      "audio_filename": "track-sample-001.mp3"
+    }
+  ]
+}
