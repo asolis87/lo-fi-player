@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,5 +142,48 @@ func TestLoadFromDir_RejectsSubdirWithoutTrackJson(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "track-orphan") {
 		t.Fatalf("error %q lacks offending subdir name", err.Error())
+	}
+}
+
+// TestLoadFromDir_RejectsChecksumMismatch is the PR-D #3.2 gate:
+// when a subdir ships audio.mp3 + track.json but the embedded
+// checksum_sha256 does not match the actual bytes, LoadFromDir
+// MUST abort with an error wrapping ErrChecksumMismatch and
+// naming the offending track id so the operator can re-hash the
+// file or fix the manifest. We do not assert on the hex strings
+// themselves (the digest is deterministic but verbose) — the
+// wrapper-class check is what callers actually match on.
+func TestLoadFromDir_RejectsChecksumMismatch(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "track-bad-checksum")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	tr := validTrack()
+	tr.ID = "track-bad-checksum"
+	tr.ChecksumSHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
+	data, err := json.MarshalIndent(tr, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "track.json"), data, 0o644); err != nil {
+		t.Fatalf("write track.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "audio.mp3"), []byte(audioFixtureBytes), 0o644); err != nil {
+		t.Fatalf("write audio.mp3: %v", err)
+	}
+
+	cat, err := LoadFromDir(root)
+	if err == nil {
+		t.Fatal("LoadFromDir(checksum mismatch) = nil, want error")
+	}
+	if cat != nil {
+		t.Fatalf("non-nil catalog on error path: %+v", cat)
+	}
+	if !errors.Is(err, ErrChecksumMismatch) {
+		t.Fatalf("error = %v, want wrapped ErrChecksumMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "track-bad-checksum") {
+		t.Fatalf("error %q lacks offending track id", err.Error())
 	}
 }

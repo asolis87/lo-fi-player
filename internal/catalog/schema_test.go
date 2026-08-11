@@ -7,7 +7,10 @@ import (
 )
 
 // validTrack returns a Track that passes Validate() so individual
-// tests only mutate the field they care about.
+// tests only mutate the field they care about. ChecksumSHA256 is
+// the SHA-256 of the deterministic audioFixtureBytes payload
+// writeTrackDir writes, so PR-D #3.2 (checksum verified at load)
+// stays green for every fixture-driven test.
 func validTrack() Track {
 	return Track{
 		SchemaVersion:   CurrentSchemaVersion,
@@ -17,7 +20,7 @@ func validTrack() Track {
 		License:         LicenseCCBY,
 		LicenseStatus:   LicenseStatusVerified,
 		SourceURL:       "https://archive.org/details/ia-drizzle",
-		ChecksumSHA256:  "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
+		ChecksumSHA256:  "ebc2689f897aa333887187a499a15658989ca923cbd49ecc8080b6eef955cdc6",
 		AttributionText: `"Slow Rain on a Tin Roof" by Anonymous, licensed CC-BY-4.0. Source: archive.org/ia-drizzle`,
 		DurationSeconds: 217,
 		AudioFilename:   "audio.mp3",
