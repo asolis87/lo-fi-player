@@ -43,6 +43,17 @@ jobs:
           key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: ${{ runner.os }}-go-build-
 
+      # `oto/v3` ships a cgo binding against ALSA (`driver_unix.go` runs
+      # `pkg-config --cflags alsa`). The Ubuntu runner does not ship the
+      # ALSA development headers by default, so the cgo compile of
+      # `internal/audio` (transitively) fails with
+      # "Package alsa was not found in the pkg-config search path."
+      # Install the headers + pkg-config once per run; this is a
+      # ~30 s cost in exchange for the procedural backend actually
+      # producing sound.
+      - name: install ALSA dev headers (oto/v3 cgo)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
       - name: go vet
         run: go vet ./...
         # `go vet ./...` is intentionally present even though PR #0 ships
