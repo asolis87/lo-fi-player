@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -340,3 +341,41 @@ func newRecordingDevice() *recordingDevice        { return &recordingDevice{} }
 func (r *recordingDevice) Write(s []int16) error  { r.mu.Lock(); defer r.mu.Unlock(); r.written = append(r.written, s...); return nil }
 func (r *recordingDevice) Close() error           { return nil }
 func (r *recordingDevice) sampleCount() int       { r.mu.Lock(); defer r.mu.Unlock(); return len(r.written) }
+
+// TestRunHeadlessPlay_ResolvesAudioPath is the PR-D #3.3 gate:
+// when `lofi play <id>` resolves a catalog track, runHeadlessPlay
+// MUST hand backend.Load a Track whose Path points at the actual
+// audio file under the cache (<cacheRoot>/<id>/audio.mp3), not
+// the empty string that the slice #1 placeholder path produced.
+// We override selectAudioBackend to a stub that returns a
+// MockBackend so we can inspect what Load received without mpv
+// on $PATH or a working procedural fallback.
+func TestRunHeadlessPlay_ResolvesAudioPath(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	writeHeadlessCatalog(t)
+	stubWaitForSignal(t)
+
+	mock := audio.NewMockBackend()
+	origSelect := selectAudioBackend
+	selectAudioBackend = func(ctx context.Context, opts ...audio.SelectOption) (audio.AudioBackend, error) {
+		return mock, nil
+	}
+	t.Cleanup(func() { selectAudioBackend = origSelect })
+
+	code, stderr := captureStderr(t, func() int { return codeFor(runPlay([]string{"track-rain"})) })
+	if code != 0 {
+		t.Fatalf("runPlay(track-rain) code = %d, want 0, stderr=%q", code, stderr)
+	}
+
+	loaded := mock.Loaded()
+	if len(loaded) != 1 {
+		t.Fatalf("MockBackend.Load called %d times, want 1 (full log: %+v)", len(loaded), loaded)
+	}
+	wantPath := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "lofi-player", "catalog", "v1", "track-rain", "audio.mp3")
+	if loaded[0].Path != wantPath {
+		t.Fatalf("Load(Track).Path = %q, want %q (track-rain should resolve to its audio.mp3 under the cache root)", loaded[0].Path, wantPath)
+	}
+	if loaded[0].ID != "track-rain" {
+		t.Fatalf("Load(Track).ID = %q, want %q", loaded[0].ID, "track-rain")
+	}
+}

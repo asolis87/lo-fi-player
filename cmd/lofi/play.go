@@ -17,6 +17,14 @@ import (
 	"github.com/asolis87/lo-fi-player/internal/tui"
 )
 
+// selectAudioBackend is the package-level injection seam for
+// audio.Select. Production wires it to audio.Select so the
+// adapter probe runs; tests swap it for a stub that returns a
+// deterministic AudioBackend (typically a MockBackend) so they
+// can capture the Track passed to Load without needing mpv on
+// $PATH or a working procedural fallback.
+var selectAudioBackend = audio.Select
+
 // tuiLauncher runs the Bubble Tea program. Tests swap it for a
 // stub so they can capture the model without taking over the
 // terminal (Bubble Tea's WithInput / WithOutput paths require a
@@ -184,7 +192,7 @@ func selectBackendForCatalogTrack(target string) (audio.AudioBackend, error) {
 		return nil, &commandError{code: 1}
 	}
 
-	backend, err := audio.Select(context.Background(), audio.WithMpvFactory(func() (audio.AudioBackend, error) {
+	backend, err := selectAudioBackend(context.Background(), audio.WithMpvFactory(func() (audio.AudioBackend, error) {
 		return audio.NewMpvBackend()
 	}))
 	if err != nil {
