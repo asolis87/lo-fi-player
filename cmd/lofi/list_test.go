@@ -32,6 +32,7 @@ func writeListCatalog(t *testing.T) {
 			ChecksumSHA256:  "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
 			AttributionText: "by Artist " + id,
 			DurationSeconds: 60,
+			AudioFilename:   "audio.mp3",
 		}
 		data, err := json.MarshalIndent(tr, "", "  ")
 		if err != nil {

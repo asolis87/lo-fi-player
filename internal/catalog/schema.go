@@ -96,6 +96,9 @@ func (t *Track) Validate() error {
 	if t.ChecksumSHA256 == "" {
 		return fmt.Errorf("%w: checksum_sha256 is empty", ErrInvalidTrack)
 	}
+	if t.AudioFilename == "" {
+		return fmt.Errorf("%w: audio_filename is empty", ErrInvalidTrack)
+	}
 	if t.DurationSeconds < 1 {
 		return fmt.Errorf("%w: duration_seconds=%d, want >= 1", ErrInvalidTrack, t.DurationSeconds)
 	}
