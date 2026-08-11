@@ -50,9 +50,15 @@ func TestRun_UnknownSubcommandExitsTwoWithUsage(t *testing.T) {
 }
 
 func TestRun_KnownPlaceholderSubcommandsExitZero(t *testing.T) {
+	// Stub launchTUI so the dispatcher can exercise `play` without
+	// grabbing the test runner's terminal.
+	stub := &stubLauncher{err: nil}
+	withStubLauncher(t, stub)
+
 	for _, sub := range []string{"play", "list", "sync"} {
 		if code, _ := captureStderr(t, func() int { return run([]string{sub}) }); code != 0 {
 			t.Errorf("run([%q]) exit code = %d, want 0", sub, code)
 		}
 	}
 }
+

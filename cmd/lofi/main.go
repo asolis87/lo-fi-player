@@ -36,7 +36,9 @@ func run(args []string) int {
 	switch args[0] {
 	case "credits":
 		return codeFor(runCredits(args[1:]))
-	case "play", "list", "sync":
+	case "play":
+		return codeFor(runPlay(args[1:]))
+	case "list", "sync":
 		fmt.Fprintf(os.Stderr, "lofi %s: not yet implemented\n", args[0])
 		return 0
 	default:
