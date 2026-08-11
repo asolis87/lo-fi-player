@@ -29,11 +29,18 @@ bootstrap.
 | CLI dispatch + headless `lofi play <id-or-station>` | shipped (PR #9) |
 | `catalog/v1/` seed + `LICENSE` (MIT) | shipped (PR #10) |
 
-The bundled `catalog/v1/` is a **placeholder seed**: every track ships
-with `license_status: "NEEDS CONFIRMATION"` and a zero SHA-256 until
-the audio bytes are audited and committed. Promotion to `VERIFIED`
-requires a signed verification report — `lofi sync` will refuse the
-seed as-is.
+The bundled `catalog/v1/` is a **placeholder seed** behind two
+distinct gates:
+
+- `lofi sync` refuses the current build because the first-run fetch
+  SHA baked into the binary is the literal placeholder
+  `<PLACEHOLDER_SHA>` (see `internal/catalog/pinning.go`); the
+  SHA-pinning regex rejects it before any network call. A real
+  commit SHA must be baked in at release time before sync can run.
+- Even once sync succeeds, every track ships with
+  `license_status: "NEEDS CONFIRMATION"` per spec #287, and
+  promotion to `VERIFIED` requires a signed report appended to
+  `catalog/v1/verification/`.
 
 ## Why this exists
 
