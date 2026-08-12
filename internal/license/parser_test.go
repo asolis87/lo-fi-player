@@ -177,3 +177,38 @@ func TestVerifyReport_BadSignatureFormat(t *testing.T) {
 func writeFile(path, body string) error {
 	return os.WriteFile(path, []byte(body), 0o644)
 }
+
+// catalogPlaceholderPath resolves the on-disk placeholder report
+// the slice #2 seed ships. It lives under catalog/v1/verification/
+// (not testdata/) so the parser test exercises a real path the
+// shipped catalog will carry.
+func catalogPlaceholderPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join("..", "..", "catalog", "v1", "verification", "track-sample-001.md")
+}
+
+// TestVerifyReport_AcceptsPlaceholder is the regression guard for
+// the placeholder contract from spec #287: a track whose audio
+// bytes have not yet been curated MUST still carry a parseable
+// verification report so the catalog loader can hand a stable
+// shape to future tooling. The 64-zero SHA-256 is intentionally
+// accepted because the regex `^[0-9a-f]{64}$` matches it — it
+// is the SHA of the empty input, which the loader already rejects
+// at checksum-verification time (PR-D #3.2). The report parser
+// stays orthogonal to the audio checksum so each layer can fail
+// independently with its own error class.
+func TestVerifyReport_AcceptsPlaceholder(t *testing.T) {
+	got, err := VerifyReport(catalogPlaceholderPath(t))
+	if err != nil {
+		t.Fatalf("VerifyReport(placeholder) = %v, want nil", err)
+	}
+	if got.TrackID != "track-sample-001" {
+		t.Errorf("TrackID = %q, want %q", got.TrackID, "track-sample-001")
+	}
+	if got.LicenseURL != "https://creativecommons.org/licenses/by/4.0/" {
+		t.Errorf("LicenseURL = %q", got.LicenseURL)
+	}
+	if got.RehashedSHA256 != "0000000000000000000000000000000000000000000000000000000000000000" {
+		t.Errorf("RehashedSHA256 = %q, want 64 zeros (placeholder contract from spec #287)", got.RehashedSHA256)
+	}
+}
