@@ -255,9 +255,13 @@ func TestPlay_NoCatalogExits1WithSyncHint(t *testing.T) {
 
 // TestPlay_LaunchesTUIWhenNoArgs is the canonical TUI-launching
 // path: `lofi play` with no arguments MUST invoke the launcher
-// and hand it a Model whose Backend is non-nil and whose Mode
-// is ModeNowPlaying. The stub launcher captures the Model so
-// the assertion does not need a real TTY.
+// and hand it a Model whose Backend is non-nil. Bajo el contrato
+// CATALOG-1 (slice 3) cuando no hay catalogo sembrado (caso por
+// defecto de este test), el modo inicial pasa a ModeNoCatalog y
+// se exhibe la guia de `lofi sync`. El caso Now-Playing con
+// catalogo presente es responsabilidad del flujo de B2 (resume +
+// filtros) en su propio PR; este test solo cubre el contrato
+// minimo de lanzamiento.
 func TestPlay_LaunchesTUIWhenNoArgs(t *testing.T) {
 	stub := &stubLauncher{err: nil}
 	withStubLauncher(t, stub)
@@ -272,8 +276,8 @@ func TestPlay_LaunchesTUIWhenNoArgs(t *testing.T) {
 	if stub.model.Backend == nil {
 		t.Fatalf("TUI Model.Backend is nil; composition root did not wire the audio port")
 	}
-	if stub.model.Mode != tui.ModeNowPlaying {
-		t.Fatalf("TUI Model.Mode = %v, want ModeNowPlaying", stub.model.Mode)
+	if stub.model.Mode != tui.ModeNoCatalog {
+		t.Fatalf("TUI Model.Mode = %v, want ModeNoCatalog (no catalog seeded)", stub.model.Mode)
 	}
 }
 
@@ -337,10 +341,15 @@ type recordingDevice struct {
 	written []int16
 }
 
-func newRecordingDevice() *recordingDevice        { return &recordingDevice{} }
-func (r *recordingDevice) Write(s []int16) error  { r.mu.Lock(); defer r.mu.Unlock(); r.written = append(r.written, s...); return nil }
-func (r *recordingDevice) Close() error           { return nil }
-func (r *recordingDevice) sampleCount() int       { r.mu.Lock(); defer r.mu.Unlock(); return len(r.written) }
+func newRecordingDevice() *recordingDevice { return &recordingDevice{} }
+func (r *recordingDevice) Write(s []int16) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.written = append(r.written, s...)
+	return nil
+}
+func (r *recordingDevice) Close() error     { return nil }
+func (r *recordingDevice) sampleCount() int { r.mu.Lock(); defer r.mu.Unlock(); return len(r.written) }
 
 // TestRunHeadlessPlay_ResolvesAudioPath is the PR-D #3.3 gate:
 // when `lofi play <id>` resolves a catalog track, runHeadlessPlay

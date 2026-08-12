@@ -8,12 +8,15 @@ import (
 	"github.com/asolis87/lo-fi-player/internal/audio"
 )
 
-// TestModel_StartsOnNowPlaying is mandatory: the program MUST land on
-// the Now-Playing view when constructed via NewModel so REQ-TUI-1 has
-// a deterministic entry point.
+// TestModel_StartsOnNowPlaying is mandatory: cuando se construye
+// el Model con un catalogo presente, el programa debe aterrizar en
+// Now-Playing (REQ-TUI-1) para mantener el flujo slice-1 intacto.
+// El caso de catalogo ausente vive en TestModelNoCatalog_StartsWhenCatalogNil
+// en nocatalog_test.go (CATALOG-1).
 func TestModel_StartsOnNowPlaying(t *testing.T) {
 	backend := audio.NewMockBackend()
-	m := NewModel(backend, nil, nil)
+	cat := newFilledCatalog()
+	m := NewModel(backend, cat, nil)
 
 	if m.Mode != ModeNowPlaying {
 		t.Fatalf("Mode = %v, want %v", m.Mode, ModeNowPlaying)
@@ -46,7 +49,8 @@ func TestModel_NavigationKeys_SwitchViews(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(string(tc.key), func(t *testing.T) {
-			m := NewModel(audio.NewMockBackend(), nil, nil)
+			cat := newFilledCatalog()
+			m := NewModel(audio.NewMockBackend(), cat, nil)
 			if tc.startOn != 0 {
 				m.Mode = tc.startOn
 			}

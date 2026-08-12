@@ -15,6 +15,7 @@ import (
 
 	"github.com/asolis87/lo-fi-player/internal/audio"
 	"github.com/asolis87/lo-fi-player/internal/catalog"
+	"github.com/asolis87/lo-fi-player/internal/config"
 )
 
 // Mode identifies the four REQ-TUI-1 screens the user can switch
@@ -35,11 +36,16 @@ const (
 	// ModeAttribution renders the five REQ-ATT-2 fields for the
 	// currently selected track.
 	ModeAttribution
+	// ModeNoCatalog se muestra cuando el catalogo es nulo o vacio;
+	// exhibe la guia de CATALOG-1 sin invocar la red.
+	ModeNoCatalog
 )
 
 // defaultVolume is the slice-#1 starting volume. It matches the
 // spec's mid-point (S-AUD-2 keeps volume above 0 and below 100).
-const defaultVolume = 50
+// Re-export from internal/config.DefaultVolume para que el modelo
+// y el estado vivo compartan una sola fuente de verdad (VOL-1).
+const defaultVolume = config.DefaultVolume
 
 // volumeStep is how many percentage points + and - change the
 // volume by per keypress.
@@ -66,13 +72,37 @@ type Model struct {
 // NewModel builds a fresh Model with the default mode, volume, and
 // no error. The backend and catalog are stored as-is so the TUI can
 // reach into them on every keypress. ErrCh may be nil — the Model
-// treats a nil channel as "no async event source".
+// treats a nil channel as "no async event source". La firma se
+// conserva para no romper el slice-1; delega a NewModelWithState
+// pasando nil como state para preservar el comportamiento anterior.
 func NewModel(backend audio.AudioBackend, cat *catalog.Catalog, errCh chan audio.Event) Model {
+	return NewModelWithState(backend, cat, nil, errCh)
+}
+
+// NewModelWithState hidrata el Model desde un PlaybackState vivo.
+// Cuando state es no-nil, Volume se inicializa con
+// state.EffectiveVolume() y la historia queda disponible para que
+// B3 la proyecte en la vista de Queue (FILTER-1 + FILTER-2). Con
+// state nil, se cae al defaultVolume de slice-1. Ningun campo de
+// state se muta aqui: la persistencia es responsabilidad de B5.
+//
+// El modo inicial se elige segun la presencia de catalogo:
+// nil/empty -> ModeNoCatalog (CATALOG-1). En cualquier otro caso
+// sigue siendo ModeNowPlaying para preservar el flujo slice-1.
+func NewModelWithState(backend audio.AudioBackend, cat *catalog.Catalog, state *config.PlaybackState, errCh chan audio.Event) Model {
+	vol := defaultVolume
+	if state != nil {
+		vol = state.EffectiveVolume()
+	}
+	mode := ModeNowPlaying
+	if cat == nil {
+		mode = ModeNoCatalog
+	}
 	return Model{
 		Backend: backend,
 		Catalog: cat,
-		Mode:    ModeNowPlaying,
-		Volume:  defaultVolume,
+		Mode:    mode,
+		Volume:  vol,
 		ErrCh:   errCh,
 	}
 }
@@ -110,9 +140,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View delegates to the per-mode renderer. A non-fatal error banner
 // is appended in the dispatcher so individual modes stay focused
-// on their subject matter.
+// on their subject matter. ModeNoCatalog enruta a viewNoCatalog
+// sin mostrar controles (CATALOG-1).
 func (m Model) View() string {
 	switch m.Mode {
+	case ModeNoCatalog:
+		return viewNoCatalog(m)
 	case ModeQueue:
 		return viewQueue(m)
 	case ModeCatalog:

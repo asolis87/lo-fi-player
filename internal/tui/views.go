@@ -9,6 +9,12 @@ import (
 	"github.com/asolis87/lo-fi-player/internal/catalog"
 )
 
+// noCatalogTUIText es el unico mensaje que se exhibe cuando el
+// catalogo es nulo o vacio (CATALOG-1 escenario 1). Es una const
+// para que el test y la vista compartan una fuente de verdad y
+// futuros copy-edits se propaguen atomicamente.
+const noCatalogTUIText = "No catalog found. Run `lofi sync` to download tracks."
+
 // viewNowPlaying is the default REQ-TUI-1 landing view. It shows
 // the playback controls, the navigation legend, and the non-fatal
 // crash banner required by S-TUI-2.
@@ -22,6 +28,20 @@ func viewNowPlaying(m Model) string {
 		b.WriteString(m.LastError)
 		b.WriteString("\n")
 	}
+	return b.String()
+}
+
+// viewNoCatalog muestra la guia de CATALOG-1 sin controles ni
+// navegacion: cuando el catalogo esta ausente, el TUI no debe
+// pretender reproducir nada ni confundir al usuario con atajos
+// que dependen del catalogo (queue, attribution). El texto vive
+// en una sola constante para que test y renderer no se
+// desincronicen.
+func viewNoCatalog(m Model) string {
+	var b strings.Builder
+	b.WriteString("lo-fi player - Now Playing\n\n")
+	b.WriteString(noCatalogTUIText)
+	b.WriteString("\n")
 	return b.String()
 }
 

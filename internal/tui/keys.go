@@ -78,7 +78,9 @@ func (m Model) applyAction(a keyAction) (tea.Model, tea.Cmd) {
 	case actionNavQueue:
 		// Contextual per the prompt: "q (en now-playing) = quit",
 		// otherwise "q" reaches the Queue view per REQ-TUI-1.
-		if m.Mode == ModeNowPlaying {
+		// ModeNoCatalog no tiene Queue a donde ir -> la q sale
+		// de la aplicacion, igual que en Now-Playing.
+		if m.Mode == ModeNowPlaying || m.Mode == ModeNoCatalog {
 			return m, tea.Quit
 		}
 		m.Mode = ModeQueue
