@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -327,5 +329,48 @@ func TestQuarantineInvalidConfig_MovesFileAside(t *testing.T) {
 	bak := target + backupSuffix
 	if _, err := os.Stat(bak); err != nil {
 		t.Fatalf("backup %s missing: %v", bak, err)
+	}
+}
+
+// errRenameForced es un sentinel de falla inyectable en el seam
+// renameFile (PERSIST-2).
+var errRenameForced = errors.New("config: rename forced failure")
+
+// TestAtomicFailure_PreRename_PreservesPrior valida PERSIST-2:
+// falla controlada antes del rename preserva archivo previo,
+// elimina staging, devuelve error inyectado verbatim.
+func TestAtomicFailure_PreRename_PreservesPrior(t *testing.T) {
+	target := withTempConfigHome(t)
+	parent := filepath.Dir(target)
+	prior := "# prior contents that MUST survive the forced rename failure\nlast_queue = [\"a\", \"b\"]\nlast_track_index = 2\nvolume = 99\n"
+	if err := os.WriteFile(target, []byte(prior), 0o600); err != nil {
+		t.Fatalf("seed prior config: %v", err)
+	}
+	before, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read prior config: %v", err)
+	}
+	original := renameFile
+	renameFile = func(string, string) error { return errRenameForced }
+	t.Cleanup(func() { renameFile = original })
+	err = Save(&Config{LastQueue: []string{"NEW"}, LastTrackIndex: 0, Volume: 1})
+	if !errors.Is(err, errRenameForced) {
+		t.Fatalf("Save() error = %v, want errRenameForced", err)
+	}
+	after, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target after forced failure: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("prior config mutated byte-for-byte under forced rename failure:\nbefore=%q\nafter=%q", before, after)
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatalf("ReadDir(%s) after forced failure: %v", parent, err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), tempPrefix) {
+			t.Fatalf("staging file leaked after forced rename failure: %s", e.Name())
+		}
 	}
 }
