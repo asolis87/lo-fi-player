@@ -8,7 +8,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -26,39 +28,94 @@ import (
 // $PATH or a working procedural fallback.
 var selectAudioBackend = audio.Select
 
-// tuiLauncher runs the Bubble Tea program. Tests swap it for a
-// stub so they can capture the model without taking over the
-// terminal (Bubble Tea's WithInput / WithOutput paths require a
-// TTY in some environments).
+// tuiLauncher runs the Bubble Tea program. Production wires
+// tea.WithoutSignalHandler so Bubble Tea does NOT install its own
+// SIGINT/SIGTERM trap — watchTUISignals owns the OS signal path.
 type tuiLauncher func(m tui.Model) error
 
-// launchTUI is the production launcher. Override in tests only.
 var launchTUI tuiLauncher = func(m tui.Model) error {
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, tea.WithoutSignalHandler())
+	return watchTUISignals(p, m.State, make(chan os.Signal, 1))
+}
+
+// watchTUISignals owns SIGINT/SIGTERM for the TUI path (B5 SIGNAL-1 TUI).
+func watchTUISignals(p *tea.Program, state *config.PlaybackState, sigCh chan os.Signal) error {
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-sigCh:
+			p.Quit()
+		case <-done:
+		}
+	}()
 	_, err := p.Run()
+	close(done)
+	cliFinalizeOnce.Do(func() {
+		if ferr := cliSignalFinalize(state); ferr != nil {
+			fmt.Fprintf(os.Stderr, "lofi play: save state: %v\n", ferr)
+		}
+	})
 	return err
 }
 
-// waitForSignal blocks until the process receives SIGINT or
-// SIGTERM. Exposed as a package-level var so tests can swap it
-// for an immediate-return stub. EOF on stdin is intentionally NOT
-// considered a stop signal — headless playback in scripts
-// frequently runs without a controlling terminal, and exiting on
-// stdin close would break every `lofi play <id> &` invocation.
+// signalCh is the injected OS signal channel; tests swap it for a plain channel.
+var signalCh chan os.Signal
+
+// cliSignalFinalize is the sole CLI-side save entry for SIGINT/SIGTERM.
+// TUI's q/Ctrl+C is owned by internal/tui.tuiStatePersister.
+var cliSignalFinalize = func(state *config.PlaybackState) error {
+	if state == nil {
+		return nil
+	}
+	return boundedSave(state)
+}
+
+// cliFinalizeOnce guards against double-save races.
+var cliFinalizeOnce sync.Once
+
+// boundedSave runs state.Persist under a 5s timeout (PERSIST-2).
+func boundedSave(state *config.PlaybackState) error {
+	done := make(chan error, 1)
+	go func() { done <- state.Persist() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("save state: timeout after 5s")
+	}
+}
+
+// waitForSignal blocks until SIGINT/SIGTERM.
 var waitForSignal = func() error {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(ch)
-	<-ch
+	if signalCh == nil {
+		signalCh = make(chan os.Signal, 1)
+		signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM)
+	}
+	<-signalCh
 	return nil
 }
 
-// runPlay dispatches `lofi play`. With one positional argument
-// the headless path takes precedence (explicit-id-wins; resume
-// prompt and hydration are skipped per slice-3 RESUME-1 contract).
-// With zero arguments runInteractiveResume owns the TUI branch:
-// prior state + TTY prompts, prior state + non-TTY auto-hydrates,
-// no prior state skips the prompt entirely. See play_resume.go.
+// recordAndPersistOnPlaySuccess: solo cuando backend.Play retorna nil
+// se registra el track en MRU y se persiste. Failed Play NO muta
+// history. Errores no-fatales.
+var recordAndPersistOnPlaySuccess = func(state *config.PlaybackState, trackID string) {
+	if state == nil {
+		return
+	}
+	if err := state.RecordPlayed(trackID); err != nil {
+		fmt.Fprintf(os.Stderr, "lofi play: save state: %v\n", err)
+		return
+	}
+	if err := state.Persist(); err != nil {
+		fmt.Fprintf(os.Stderr, "lofi play: save state: %v\n", err)
+	}
+}
+
+// runPlay dispatches `lofi play`. With one positional argument the
+// headless path takes precedence (RESUME-1 explicit-id-wins). Zero
+// args go to runInteractiveResume (see play_resume.go).
 func runPlay(args []string) error {
 	if len(args) > 0 {
 		return runHeadlessPlay(args[0])
@@ -66,24 +123,16 @@ func runPlay(args []string) error {
 	return runInteractiveResume()
 }
 
-// runHeadlessPlay resolves target into an audio backend and runs
-// it through the full Load -> Play -> waitForSignal -> Close
-// lifecycle. The catalog is loaded exactly once and reused for
-// track lookup; procedural stations skip catalog loading and
-// audio.Select entirely per the slice #1 contract.
+// runHeadlessPlay: Load -> Play -> RecordPlayed+Persist -> waitForSignal
+// -> cliSignalFinalize -> Close. State is best-effort: nil still plays.
 func runHeadlessPlay(target string) error {
-	// REQ-CFG-* still applies: the config is loaded so future
-	// releases can persist last-queue / last-track-index across
-	// headless invocations without re-plumbing this seam. For
-	// slice #1 we only need it to be loadable; persistence is
-	// PR #10+ work.
-	_ = config.LoadOrDefault()
+	state := config.LoadPlaybackState()
 
 	backend, audioPath, err := resolveHeadlessBackend(target)
 	if err != nil {
 		return err
 	}
-	return playBackend(backend, target, audioPath)
+	return playBackend(backend, target, audioPath, state)
 }
 
 // resolveHeadlessBackend picks the AudioBackend that will serve
@@ -230,13 +279,11 @@ func findTrackByID(cat *catalog.Catalog, id string) *catalog.Track {
 	return nil
 }
 
-// playBackend runs the AudioBackend lifecycle: Load with a Track
-// whose ID matches the user request and whose Path is the
-// resolved on-disk audio file (empty for procedural targets,
-// whose backends synthesize samples). Play starts the stream;
-// waitForSignal blocks until SIGINT/SIGTERM; Close releases
-// resources.
-func playBackend(backend audio.AudioBackend, trackID, audioPath string) error {
+// playBackend runs the AudioBackend lifecycle. Failed Play MUST NOT
+// touch state (B5 failed-Play guard); success records+persists then
+// waitForSignal blocks until SIGINT/SIGTERM and cliSignalFinalize
+// saves once. state is optional.
+func playBackend(backend audio.AudioBackend, trackID, audioPath string, state *config.PlaybackState) error {
 	if backend == nil {
 		return &commandError{code: 1}
 	}
@@ -245,7 +292,6 @@ func playBackend(backend audio.AudioBackend, trackID, audioPath string) error {
 			fmt.Fprintf(os.Stderr, "lofi play: close backend: %v\n", cerr)
 		}
 	}()
-
 	if err := backend.Load(audio.Track{ID: trackID, Path: audioPath}); err != nil {
 		fmt.Fprintf(os.Stderr, "lofi play: load: %v\n", err)
 		return &commandError{code: 1}
@@ -254,5 +300,16 @@ func playBackend(backend audio.AudioBackend, trackID, audioPath string) error {
 		fmt.Fprintf(os.Stderr, "lofi play: play: %v\n", err)
 		return &commandError{code: 1}
 	}
-	return waitForSignal()
+	if state != nil {
+		recordAndPersistOnPlaySuccess(state, trackID)
+	}
+	if err := waitForSignal(); err != nil {
+		return err
+	}
+	cliFinalizeOnce.Do(func() {
+		if err := cliSignalFinalize(state); err != nil {
+			fmt.Fprintf(os.Stderr, "lofi play: save state: %v\n", err)
+		}
+	})
+	return nil
 }

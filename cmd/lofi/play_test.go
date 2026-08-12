@@ -4,12 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/asolis87/lo-fi-player/internal/audio"
 	"github.com/asolis87/lo-fi-player/internal/catalog"
@@ -534,3 +540,122 @@ func TestRunHeadlessPlay_ResolvesAudioPath(t *testing.T) {
 		t.Fatalf("Load(Track).ID = %q, want %q", loaded[0].ID, "track-rain")
 	}
 }
+
+// failingPlayBackend embeds MockBackend and returns ErrBackendUnavailable from Play.
+type failingPlayBackend struct{ *audio.MockBackend }
+
+func (f *failingPlayBackend) Play() error { return audio.ErrBackendUnavailable }
+
+// withRecordAndPersistStub swaps the post-Play seam.
+func withRecordAndPersistStub(t *testing.T, fn func(*config.PlaybackState, string)) {
+	t.Helper()
+	orig := recordAndPersistOnPlaySuccess
+	recordAndPersistOnPlaySuccess = fn
+	t.Cleanup(func() { recordAndPersistOnPlaySuccess = orig })
+}
+
+// runB5Backend wires signalCh + cliSignalFinalize + waitForSignal and fires `sig`.
+func runB5Backend(t *testing.T, finalize func(*config.PlaybackState) error, state *config.PlaybackState, sig os.Signal) *audio.MockBackend {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	signalCh, cliFinalizeOnce = make(chan os.Signal, 1), sync.Once{}
+	t.Cleanup(func() { signalCh = nil })
+	withCLIFinalizeStub(t, finalize)
+	stubWaitForSignal(t)
+	backend := audio.NewMockBackend()
+	done := make(chan error, 1)
+	go func() { done <- playBackend(backend, "track-rain", "<path>", state) }()
+	for !backend.Played() {
+		time.Sleep(time.Millisecond)
+	}
+	signalCh <- sig
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("playBackend: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("playBackend did not return after %s", sig)
+	}
+	return backend
+}
+
+func TestPersistOnTrackStart(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	state := config.NewPlaybackState(config.Default())
+	var calls int32
+	withRecordAndPersistStub(t, func(s *config.PlaybackState, id string) {
+		atomic.AddInt32(&calls, 1)
+		_ = s.RecordPlayed(id)
+	})
+	stubWaitForSignal(t)
+	if err := playBackend(audio.NewMockBackend(), "track-rain", "<path>", state); err != nil {
+		t.Fatalf("playBackend: %v", err)
+	}
+	if atomic.LoadInt32(&calls) != 1 || state.History()[0] != "track-rain" {
+		t.Fatalf("calls=%d history=%v", atomic.LoadInt32(&calls), state.History())
+	}
+}
+
+func TestFailedPlayNoHistory(t *testing.T) {
+	state := config.NewPlaybackState(config.Default())
+	var calls int32
+	withRecordAndPersistStub(t, func(_ *config.PlaybackState, _ string) { atomic.AddInt32(&calls, 1) })
+	stubWaitForSignal(t)
+	if err := playBackend(&failingPlayBackend{MockBackend: audio.NewMockBackend()}, "track-rain", "<path>", state); err == nil {
+		t.Fatal("playBackend with failing Play should return error")
+	}
+	if atomic.LoadInt32(&calls) != 0 || len(state.History()) != 0 {
+		t.Fatalf("calls=%d history=%v", atomic.LoadInt32(&calls), state.History())
+	}
+}
+
+func testSignalFinalize(t *testing.T, sig os.Signal) {
+	t.Helper()
+	var calls int32
+	runB5Backend(t, func(_ *config.PlaybackState) error { atomic.AddInt32(&calls, 1); return nil }, config.NewPlaybackState(config.Default()), sig)
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("cliSignalFinalize calls = %d, want 1", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestSignalFinalizeSIGINT(t *testing.T)  { testSignalFinalize(t, syscall.SIGINT) }
+func TestSignalFinalizeSIGTERM(t *testing.T) { testSignalFinalize(t, syscall.SIGTERM) }
+
+func TestSaveErrorContinues_Headless(t *testing.T) {
+	state := config.NewPlaybackState(config.Default())
+	withRecordAndPersistStub(t, func(_ *config.PlaybackState, _ string) {})
+	code, stderr := captureStderr(t, func() int {
+		runB5Backend(t, func(_ *config.PlaybackState) error { return fmt.Errorf("disk write failed") }, state, syscall.SIGINT)
+		return 0
+	})
+	if code != 0 || !strings.Contains(stderr, "lofi play: save state:") || !strings.Contains(stderr, "disk write failed") {
+		t.Fatalf("code=%d stderr=%q want 0 with save-state error", code, stderr)
+	}
+}
+
+// testWatchTUISignal (B5 SIGNAL-1 TUI): watchTUISignals owns SIGINT/SIGTERM.
+func testWatchTUISignal(t *testing.T, sig os.Signal) {
+	t.Helper()
+	var calls int32
+	withCLIFinalizeStub(t, func(_ *config.PlaybackState) error { atomic.AddInt32(&calls, 1); return nil })
+	p := tea.NewProgram(tui.NewModel(audio.NewMockBackend(), nil, nil), tea.WithoutSignalHandler(), tea.WithInput(strings.NewReader("")), tea.WithOutput(io.Discard))
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan error, 1)
+	go func() { done <- watchTUISignals(p, config.NewPlaybackState(config.Default()), sigCh) }()
+	sigCh <- sig
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("watchTUISignals: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("watchTUISignals did not return for %v", sig)
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("cliSignalFinalize calls = %d, want 1", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestWatchTUISignals_SIGINT(t *testing.T)  { testWatchTUISignal(t, syscall.SIGINT) }
+func TestWatchTUISignals_SIGTERM(t *testing.T) { testWatchTUISignal(t, syscall.SIGTERM) }

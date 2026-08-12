@@ -56,8 +56,9 @@ const volumeStep = 5
 // the cached volume level, the latest non-fatal error message, and
 // the audio Event channel the composition root feeds asynchronously.
 // SelectedIdx and Playing are not surfaced to the user yet (PR #8
-// covers structure only); they exist so future work units can add
-// track-aware navigation without changing the model surface.
+// covers structure only). State is the optional live PlaybackState
+// (slice-3 B1/B5); when non-nil, volume and q/Ctrl+C persist via
+// tuiStatePersister.
 type Model struct {
 	Backend     audio.AudioBackend
 	Catalog     *catalog.Catalog
@@ -67,6 +68,7 @@ type Model struct {
 	LastError   string
 	ErrCh       chan audio.Event
 	Playing     bool
+	State       *config.PlaybackState
 }
 
 // NewModel builds a fresh Model with the default mode, volume, and
@@ -80,19 +82,13 @@ func NewModel(backend audio.AudioBackend, cat *catalog.Catalog, errCh chan audio
 }
 
 // NewModelWithState hidrata el Model desde un PlaybackState vivo.
-// Cuando state es no-nil, Volume se inicializa con
-// state.EffectiveVolume() y la historia queda disponible para que
-// B3 la proyecte en la vista de Queue (FILTER-1 + FILTER-2). Con
-// state nil, se cae al defaultVolume de slice-1. Ningun campo de
-// state se muta aqui: la persistencia es responsabilidad de B5.
-//
-// El modo inicial se elige segun la presencia de catalogo:
-// nil/empty -> ModeNoCatalog (CATALOG-1). En cualquier otro caso
-// sigue siendo ModeNowPlaying para preservar el flujo slice-1.
+// state no-nil inicializa Volume y enlaza tuiStatePersister.
+// nil/empty catalog -> ModeNoCatalog (CATALOG-1).
 func NewModelWithState(backend audio.AudioBackend, cat *catalog.Catalog, state *config.PlaybackState, errCh chan audio.Event) Model {
 	vol := defaultVolume
 	if state != nil {
 		vol = state.EffectiveVolume()
+		initPersisterForState(state)
 	}
 	mode := ModeNowPlaying
 	if cat == nil {
@@ -104,6 +100,7 @@ func NewModelWithState(backend audio.AudioBackend, cat *catalog.Catalog, state *
 		Mode:    mode,
 		Volume:  vol,
 		ErrCh:   errCh,
+		State:   state,
 	}
 }
 

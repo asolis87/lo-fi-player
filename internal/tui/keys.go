@@ -1,6 +1,20 @@
 package tui
 
-import tea "github.com/charmbracelet/bubbletea"
+import (
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/asolis87/lo-fi-player/internal/config"
+)
+
+// tuiStatePersister: TUI-side save for q/Ctrl+C and volume (PERSIST-1).
+var tuiStatePersister = func() error { return nil }
+
+func (m Model) saveAndQuit() (tea.Model, tea.Cmd) {
+	if err := tuiStatePersister(); err != nil {
+		m.LastError = "save state: " + err.Error()
+	}
+	return m, tea.Quit
+}
 
 // keyAction is the internal representation of what the keymap
 // handler should do for a given keypress. Keeping dispatch on
@@ -62,9 +76,8 @@ func bindingFor(msg tea.KeyMsg) (keyAction, bool) {
 	return actionNone, false
 }
 
-// applyAction turns a keymap action into model state and, when the
-// action triggers the program to exit, into a tea.Quit command.
-// Returning the model by value is the Bubble Tea convention.
+// applyAction: q (on NowPlaying/NoCatalog) and Ctrl+C route through
+// saveAndQuit so the TUI persists state before tea.Quit fires.
 func (m Model) applyAction(a keyAction) (tea.Model, tea.Cmd) {
 	switch a {
 	case actionPlayPause:
@@ -72,7 +85,7 @@ func (m Model) applyAction(a keyAction) (tea.Model, tea.Cmd) {
 	case actionEsc:
 		return m.handleEsc(), nil
 	case actionQuit:
-		return m, tea.Quit
+		return m.saveAndQuit()
 	case actionNavNowPlaying:
 		m.Mode = ModeNowPlaying
 	case actionNavQueue:
@@ -81,7 +94,7 @@ func (m Model) applyAction(a keyAction) (tea.Model, tea.Cmd) {
 		// ModeNoCatalog no tiene Queue a donde ir -> la q sale
 		// de la aplicacion, igual que en Now-Playing.
 		if m.Mode == ModeNowPlaying || m.Mode == ModeNoCatalog {
-			return m, tea.Quit
+			return m.saveAndQuit()
 		}
 		m.Mode = ModeQueue
 	case actionNavCatalog:
@@ -118,10 +131,8 @@ func (m Model) togglePlay() Model {
 	return m
 }
 
-// bumpVolume clamps the new value to the [0, 100] range that the
-// AudioBackend port enforces (ErrVolumeOutOfRange) and forwards the
-// call to the backend. Underflow is impossible because of the clamp,
-// matching S-AUD-2.
+// bumpVolume clamps to [0, 100] and forwards to backend. Live state
+// writes the volume and persists synchronously (PERSIST-1 volume).
 func (m Model) bumpVolume(delta int) Model {
 	next := m.Volume + delta
 	if next > 100 {
@@ -132,7 +143,22 @@ func (m Model) bumpVolume(delta int) Model {
 	}
 	m.Volume = next
 	_ = m.Backend.SetVolume(next)
+	if m.State != nil {
+		if err := m.State.SetVolume(next); err == nil {
+			if perr := tuiStatePersister(); perr != nil {
+				m.LastError = "save state: " + perr.Error()
+			}
+		}
+	}
 	return m
+}
+
+// initPersisterForState binds tuiStatePersister to the supplied state.
+func initPersisterForState(state *config.PlaybackState) {
+	if state == nil {
+		return
+	}
+	tuiStatePersister = func() error { return state.Persist() }
 }
 
 // handleEsc implements the prompt's "esc = back" rule: any

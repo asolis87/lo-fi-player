@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -134,4 +135,13 @@ func withLoadStateForResumeStub(t *testing.T, fn func() *config.PlaybackState) {
 	orig := loadStateForResume
 	loadStateForResume = fn
 	t.Cleanup(func() { loadStateForResume = orig })
+}
+
+// withCLIFinalizeStub swaps cliSignalFinalize and resets cliFinalizeOnce.
+func withCLIFinalizeStub(t *testing.T, fn func(*config.PlaybackState) error) {
+	t.Helper()
+	orig := cliSignalFinalize
+	cliSignalFinalize = fn
+	cliFinalizeOnce = sync.Once{}
+	t.Cleanup(func() { cliSignalFinalize = orig })
 }
