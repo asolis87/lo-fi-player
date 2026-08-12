@@ -35,6 +35,26 @@ func NewPlaybackState(raw Config) *PlaybackState {
 	return &PlaybackState{raw: raw}
 }
 
+// LoadPlaybackState lee el config persistido y devuelve un
+// PlaybackState hidratado. Archivo ausente o corrupto = nil
+// ("sin estado previo"). LastQueue legacy se migra a History
+// via migrateLegacyToV2 sin persistir (B5 dueña del write-back).
+// History+LastQueue vacios devuelven nil porque no hay estado
+// que reanudar.
+func LoadPlaybackState() *PlaybackState {
+	cfg, err := Load()
+	if err != nil || cfg == nil {
+		return nil
+	}
+	if len(cfg.History) == 0 && len(cfg.LastQueue) > 0 {
+		cfg.History = migrateLegacyToV2(cfg.LastQueue)
+	}
+	if len(cfg.History) == 0 {
+		return nil
+	}
+	return NewPlaybackState(*cfg)
+}
+
 // EffectiveVolume devuelve el volumen crudo si esta dentro del
 // rango estricto [0, 100]; en caso contrario devuelve 50 sin
 // reescribir el raw persistido (VOL-1 + VOL-2).

@@ -53,25 +53,17 @@ var waitForSignal = func() error {
 	return nil
 }
 
-// runPlay dispatches `lofi play`. With no positional argument the
-// TUI takes over the terminal (REQ-CLI-2 / REQ-TUI-1); with one
-// argument the headless path:
-//
-//  1. resolves the audio backend (procedural:station or catalog
-//     track) per the spec contract, OR
-//  2. prints a precise, actionable error to stderr and returns a
-//     non-zero commandError.
+// runPlay dispatches `lofi play`. With one positional argument
+// the headless path takes precedence (explicit-id-wins; resume
+// prompt and hydration are skipped per slice-3 RESUME-1 contract).
+// With zero arguments runInteractiveResume owns the TUI branch:
+// prior state + TTY prompts, prior state + non-TTY auto-hydrates,
+// no prior state skips the prompt entirely. See play_resume.go.
 func runPlay(args []string) error {
-	if len(args) == 0 {
-		backend := audio.NewMockBackend()
-		m := tui.NewModel(backend, nil, nil)
-		if err := launchTUI(m); err != nil {
-			fmt.Fprintf(os.Stderr, "lofi play: tui: %v\n", err)
-			return &commandError{code: 1}
-		}
-		return nil
+	if len(args) > 0 {
+		return runHeadlessPlay(args[0])
 	}
-	return runHeadlessPlay(args[0])
+	return runInteractiveResume()
 }
 
 // runHeadlessPlay resolves target into an audio backend and runs

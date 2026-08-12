@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"os"
+	"sync/atomic"
 	"testing"
 
+	"github.com/asolis87/lo-fi-player/internal/config"
 	"github.com/asolis87/lo-fi-player/internal/tui"
 )
 
@@ -82,4 +84,54 @@ func withStubLauncher(t *testing.T, s *stubLauncher) {
 	orig := launchTUI
 	launchTUI = s.launch
 	t.Cleanup(func() { launchTUI = orig })
+}
+
+// withStdinIsTTYStub swaps the stdinIsTTY predicate for the
+// duration of the test. resumePrompter (y/N read) is the only
+// caller; non-TTY tests assert that the prompter NEVER invokes
+// Read on resumeReader.
+func withStdinIsTTYStub(t *testing.T, isTTY bool) {
+	t.Helper()
+	orig := stdinIsTTY
+	stdinIsTTY = func() bool { return isTTY }
+	t.Cleanup(func() { stdinIsTTY = orig })
+}
+
+// withResumeReaderStub swaps resumeReader for the supplied reader
+// for the duration of the test. Tests pair it with
+// withStdinIsTTYStub(true) to drive the TTY accept/decline
+// decision deterministically without opening a real terminal.
+func withResumeReaderStub(t *testing.T, r io.Reader) {
+	t.Helper()
+	orig := resumeReader
+	resumeReader = r
+	t.Cleanup(func() { resumeReader = orig })
+}
+
+// countingReader counts every Read call without consuming any
+// bytes. Tests use it to assert the non-TTY path never touches
+// stdin (RESUME-2).
+type countingReader struct {
+	calls *atomic.Int32
+}
+
+func newCountingReader() *countingReader {
+	return &countingReader{calls: &atomic.Int32{}}
+}
+
+func (c *countingReader) Read(_ []byte) (int, error) {
+	c.calls.Add(1)
+	return 0, io.EOF
+}
+
+func (c *countingReader) Calls() int32 { return c.calls.Load() }
+
+// withLoadStateForResumeStub swaps loadStateForResume for the
+// duration of the test. The original is restored on cleanup so
+// parallel tests stay isolated.
+func withLoadStateForResumeStub(t *testing.T, fn func() *config.PlaybackState) {
+	t.Helper()
+	orig := loadStateForResume
+	loadStateForResume = fn
+	t.Cleanup(func() { loadStateForResume = orig })
 }
