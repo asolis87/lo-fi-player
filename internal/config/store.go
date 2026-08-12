@@ -19,6 +19,12 @@ const (
 	tempPrefix   = ".config.toml."
 	dirPerm      = 0o700
 	filePerm     = 0o600
+
+	// historyCap es el maximo de entradas que retaine el historial
+	// migrado desde v1/versionless (HIST-3 escenario cap). El
+	// migrador opera sobre el slice legacy y trunca una vez
+	// alcanzada la cota, sin tocar I/O.
+	historyCap = 25
 )
 
 // ErrCorrupt is wrapped around parse failures so the corruption
@@ -202,6 +208,133 @@ func writeTOML(w io.Writer, cfg *Config) error {
 		if _, err := fmt.Fprintln(w, ln); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// schemaVersionKey marca el router estricto de parseV2; cualquier
+// valor numerico distinto de 2 produce un error de quarantine
+// (SCHEMA-1 escenario 2: futuras versiones no se cargan
+// parcialmente).
+const schemaVersionKey = "schema_version"
+
+// parseV2 implementa el lector estricto de la v2 (SCHEMA-1): solo
+// reconoce schema_version = 2, volume y history (array de strings).
+// Cualquier otra clave de nivel superior, contenido malformado o
+// valor distinto a 2 produce error; el caller decide ejecutar la
+// cuarentena (quarantineInvalidConfig). El lector nunca es
+// permisivo y nunca omite silenciosamente claves desconocidas.
+func parseV2(data []byte) (history []string, volume int, err error) {
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			return nil, 0, fmt.Errorf("schema_version: line without '=' near %q", raw)
+		}
+		key := strings.TrimSpace(line[:eq])
+		value := strings.TrimSpace(line[eq+1:])
+		switch key {
+		case schemaVersionKey:
+			var n int
+			if uerr := json.Unmarshal([]byte(value), &n); uerr != nil {
+				return nil, 0, fmt.Errorf("schema_version: %w", uerr)
+			}
+			if n != 2 {
+				return nil, 0, fmt.Errorf("schema_version %d unsupported (only v2)", n)
+			}
+		case "volume":
+			if uerr := json.Unmarshal([]byte(value), &volume); uerr != nil {
+				return nil, 0, fmt.Errorf("volume: %w", uerr)
+			}
+		case "history":
+			if uerr := json.Unmarshal([]byte(value), &history); uerr != nil {
+				return nil, 0, fmt.Errorf("history: %w", uerr)
+			}
+			if history == nil {
+				history = []string{}
+			}
+		default:
+			return nil, 0, fmt.Errorf("unknown key %q", key)
+		}
+	}
+	return history, volume, nil
+}
+
+// writeV2 emite EXCLUSIVAMENTE los campos del esquema v2: la clave
+// legacy last_queue nunca aparece (HIST-3 + SCHEMA-1). El orden es
+// fijo para que el archivo sea byte-estable entre releases.
+func writeV2(w io.Writer, history []string, volume int) error {
+	if history == nil {
+		history = []string{}
+	}
+	historyLit, err := json.Marshal(history)
+	if err != nil {
+		return fmt.Errorf("config: marshal history: %w", err)
+	}
+	for _, ln := range []string{
+		"# lofi-player config (schema v2)",
+		fmt.Sprintf("%s = 2", schemaVersionKey),
+		fmt.Sprintf("volume = %d", volume),
+		fmt.Sprintf("history = %s", historyLit),
+	} {
+		if _, err := fmt.Fprintln(w, ln); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateLegacyToV2 convierte el orden de insercion legacy
+// (oldest -> newest) en MRU-front (newest -> newest first), elimina
+// duplicados reteniendo la primera ocurrencia en orden legacy y
+// limita a 25 (HIST-3). No toca I/O: opera sobre slices, lo que
+// permite siembra directa en tests y hace la politica deterministica
+// y facil de auditar. El algoritmo es dedupe-first-then-reverse:
+// caminamos la lista legacy reteniendo la primera ocurrencia de cada
+// id, y luego invertimos el slice resultante para producir MRU-front.
+func migrateLegacyToV2(lastQueue []string) []string {
+	if len(lastQueue) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(lastQueue))
+	dedup := make([]string, 0, len(lastQueue))
+	for _, id := range lastQueue {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		dedup = append(dedup, id)
+		if len(dedup) == historyCap {
+			break
+		}
+	}
+	if len(dedup) == 0 {
+		return []string{}
+	}
+	reversed := make([]string, len(dedup))
+	for i, v := range dedup {
+		reversed[len(dedup)-1-i] = v
+	}
+	return reversed
+}
+
+// quarantineInvalidConfig mueve un archivo inválido a <path>.bak.
+// Es la extension helper que usa SCHEMA-1 cuando parseV2 detecta
+// claves desconocidas, versiones futuras o contenido malformado:
+// el caller detecta el error y delega el movimiento a esta funcion
+// para mantener una sola politica de recovery en el paquete.
+func quarantineInvalidConfig(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("config: stat %s: %w", path, err)
+	}
+	if err := os.Rename(path, path+backupSuffix); err != nil {
+		return fmt.Errorf("config: quarantine %s: %w", path, err)
 	}
 	return nil
 }

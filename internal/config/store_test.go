@@ -170,3 +170,162 @@ func TestSave_AtomicWrite(t *testing.T) {
 		t.Fatalf("Load() after Save = %+v, want Volume=42 LastQueue=[track-1]", *got)
 	}
 }
+
+// TestParseV2_StrictRouting cubre los 4 escenarios de SCHEMA-1 en una
+// sola tabla: v2 exacto, v3 futuro, unknown key y malformado.
+// Cualquier ruta no v2 retorna error (quarantine lo maneja el caller).
+func TestParseV2_StrictRouting(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		wantVol int
+		wantHis []string
+		wantErr bool
+	}{
+		{"v2_round_trip", "schema_version = 2\nvolume = 75\nhistory = [\"A\", \"B\"]\n", 75, []string{"A", "B"}, false},
+		{"future_v3_quarantines", "schema_version = 3\nvolume = 50\nhistory = [\"A\"]\n", 0, nil, true},
+		{"unknown_key_quarantines", "schema_version = 2\nvolume = 75\nhistory = [\"A\"]\nunknown_field = 1\n", 0, nil, true},
+		{"malformed_quarantines", "@@@ not valid toml @@@\n=garbage=\n[[[", 0, nil, true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			gotHis, gotVol, err := parseV2([]byte(tc.in))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if gotVol != tc.wantVol {
+				t.Fatalf("volume = %d, want %d", gotVol, tc.wantVol)
+			}
+			if !reflect.DeepEqual(gotHis, tc.wantHis) {
+				t.Fatalf("history = %v, want %v", gotHis, tc.wantHis)
+			}
+		})
+	}
+}
+
+// TestMigrateLegacyToV2_SpecScenarios cubre los 3 escenarios de
+// HIST-3 en una sola tabla: reverse, dedupe-by-first-in-legacy, cap
+// 25 sin evictar.
+func TestMigrateLegacyToV2_SpecScenarios(t *testing.T) {
+	legacy25 := make([]string, 25)
+	for i := range legacy25 {
+		legacy25[i] = string(rune('A' + i))
+	}
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"reverse_simple", []string{"A", "B", "C"}, []string{"C", "B", "A"}},
+		{"dedupe_by_first_in_legacy", []string{"A", "B", "A", "C"}, []string{"C", "B", "A"}},
+		{"cap25_no_evict", legacy25, reverseSlice(legacy25)},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := migrateLegacyToV2(tc.in)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("migrated = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// reverseSlice devuelve una copia del slice en orden inverso; se
+// usa como helper para construir el "want" esperado por
+// migrateLegacyToV2 sobre entradas en orden de insercion.
+func reverseSlice(in []string) []string {
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[len(in)-1-i] = v
+	}
+	return out
+}
+
+// TestMigrateLegacyToV2_EdgeCases es la cobertura A3 sobre
+// migrateLegacyToV2: nil, vacio, un solo elemento, duplicados
+// consecutivos, y cap estricto en 26 entradas. No introduce
+// requisitos nuevos; endurece los escenarios ya verdes de A1.
+func TestMigrateLegacyToV2_EdgeCases(t *testing.T) {
+	legacy26 := make([]string, 26)
+	for i := range legacy26 {
+		legacy26[i] = string(rune('a' + i))
+	}
+	legacy25 := make([]string, 25)
+	for i := range legacy25 {
+		legacy25[i] = string(rune('a' + i))
+	}
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"nil_input", nil, []string{}},
+		{"empty_input", []string{}, []string{}},
+		{"single_element", []string{"track-1"}, []string{"track-1"}},
+		{"all_duplicates", []string{"A", "A", "A"}, []string{"A"}},
+		{"consecutive_duplicates", []string{"A", "A", "B", "B", "C"}, []string{"C", "B", "A"}},
+		{"two_distinct_reversed", []string{"A", "B"}, []string{"B", "A"}},
+		{"cap_at_25", legacy25, reverseSlice(legacy25)},
+		{"cap_evicts_in_26", legacy26, reverseSlice(legacy25[:25])},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := migrateLegacyToV2(tc.in)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("migrateLegacyToV2(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWriteV2_NeverWritesLastQueue garantiza que el escritor v2 no
+// emite la clave last_queue: emision de history reemplaza el campo
+// legacy.
+func TestWriteV2_NeverWritesLastQueue(t *testing.T) {
+	var buf strings.Builder
+	if err := writeV2(&buf, []string{"A", "B"}, 60); err != nil {
+		t.Fatalf("writeV2 error = %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "last_queue") {
+		t.Fatalf("writeV2 emitted last_queue: %q", out)
+	}
+	if !strings.Contains(out, "schema_version = 2") {
+		t.Fatalf("writeV2 missing schema_version line: %q", out)
+	}
+	if !strings.Contains(out, "volume = 60") {
+		t.Fatalf("writeV2 missing volume line: %q", out)
+	}
+	if !strings.Contains(out, `"A"`) || !strings.Contains(out, `"B"`) {
+		t.Fatalf("writeV2 missing history entries: %q", out)
+	}
+}
+
+// TestQuarantineInvalidConfig_MovesFileAside verifica que el helper
+// de quarantine mueve el archivo a <path>.bak y deja al path
+// original ausente (politica existente extendida para v3+ y
+// unknown-key).
+func TestQuarantineInvalidConfig_MovesFileAside(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, fileName)
+	corrupt := "schema_version = 3\nvolume = 50\nhistory = [\"A\"]\n"
+	if err := os.WriteFile(target, []byte(corrupt), 0o600); err != nil {
+		t.Fatalf("seed corrupt file: %v", err)
+	}
+	if err := quarantineInvalidConfig(target); err != nil {
+		t.Fatalf("quarantineInvalidConfig error = %v", err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("target %s still exists after quarantine", target)
+	}
+	bak := target + backupSuffix
+	if _, err := os.Stat(bak); err != nil {
+		t.Fatalf("backup %s missing: %v", bak, err)
+	}
+}
