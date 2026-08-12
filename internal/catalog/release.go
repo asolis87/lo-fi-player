@@ -361,7 +361,12 @@ func readElfString(ef *elf.File, sym elf.Symbol) ([]byte, error) {
 	}
 	const stringStructSize = 16
 	var buf [stringStructSize]byte
-	if _, err := sect.ReadAt(buf[:], int64(sym.Value)); err != nil {
+	// sym.Value is the symbol's virtual address, not its file
+	// offset. Subtract the section's load address to get the
+	// offset within the section's bytes; without this, on Linux
+	// the offset is a multi-megabyte virtual address and the
+	// read returns EOF before reading the 16-byte string struct.
+	if _, err := sect.ReadAt(buf[:], int64(sym.Value-sect.Addr)); err != nil {
 		return nil, fmt.Errorf("read symbol table: %v", err)
 	}
 	dataPtr := readUint64(buf[0:8])
@@ -406,7 +411,9 @@ func peStringAtSymbol(f *os.File, symName string) ([]byte, error) {
 		}
 		const stringStructSize = 16
 		var buf [stringStructSize]byte
-		if _, err := sect.ReadAt(buf[:], int64(sym.Value)); err != nil {
+		// sym.Value is the symbol's virtual address; subtract
+		// the section's load address to get the file offset.
+		if _, err := sect.ReadAt(buf[:], int64(uint64(sym.Value)-uint64(sect.VirtualAddress))); err != nil {
 			return nil, fmt.Errorf("read PE symbol: %v", err)
 		}
 		dataPtr := readUint64(buf[0:8])
@@ -415,7 +422,7 @@ func peStringAtSymbol(f *os.File, symName string) ([]byte, error) {
 			return nil, fmt.Errorf("symbol %q has zero-length runtime string", sym.Name)
 		}
 		out := make([]byte, strLen)
-		if _, err := sect.ReadAt(out, int64(dataPtr)); err != nil {
+		if _, err := sect.ReadAt(out, int64(dataPtr-uint64(sect.VirtualAddress))); err != nil {
 			return nil, fmt.Errorf("read PE rodata at %#x: %v", dataPtr, err)
 		}
 		return out, nil
