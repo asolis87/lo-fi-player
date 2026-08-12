@@ -1,0 +1,59 @@
+schema: spec-driven
+
+project: lo-fi-player
+initialized: 2026-08-11
+
+context: |
+  Stack: Go 1.22 + Bubble Tea + Lip Gloss + Bubbles + Bubble Tea v0.27.1 + mpv (JSON-IPC subprocess) + oto/v3 v3.3.3 (cgo audio sink for procedural fallback).
+  Architecture: Clean/Hexagonal. `cmd/lofi` is the composition root and use-case coordinator. Bounded contexts under `internal/`: `audio`, `catalog`, `config`, `credits`, `license`, `skeleton`, `tui`. UI and CLI depend only on ports (`AudioBackend`, etc.). Concrete adapters remain internal.
+  Audio: primary is `mpv` (external runtime dep) over JSON-IPC on a private Unix socket with bounded recovery. Procedural fallback (`procedural:rain` only at CLI level; `brown` and `white` available in package) uses a Go-side ring buffer drained by a pump goroutine into the system audio device via `oto/v3` (ALSA on Linux, CoreAudio on macOS). On hosts without an audio device, `defaultDeviceFactory` falls back to a `noopDevice` so the binary still runs.
+  Catalog: distributed via first-run fetch from a SHA-pinned GitHub-hosted manifest. The catalog seed is versioned under `catalog/v1/`. Per-track: `<id>/track.json` + `<id>/LICENSE.txt` + `<id>/audio.mp3`. Allowed licenses: `{CC0, CC-BY, CC-BY-SA}` enforced by `Track.Validate()`. `license_status: NEEDS CONFIRMATION` until a signed verification report is appended to `catalog/v1/verification/<id>.md`.
+  Config: XDG-aware, atomic TOML store at `$XDG_CONFIG_HOME/lofi-player/`, with corruption recovery.
+  Testing: Go stdlib `go test`. Strict TDD discipline (RED → GREEN per function). Mock `AudioBackend` for unit tests. CI: `go vet` + `go build` + `go test` on Ubuntu runner with `libasound2-dev` and `pkg-config` installed for the `oto/v3` cgo binding.
+  Conventions: feature-branch-chain PRs (merge target `feat/lo-fi-player`, not `main`). Branch naming `feat/pr-N-slug` or `docs/pr-N-slug`. Conventional Commits in Spanish, no `Co-Authored-By`. Review budget 400 net lines per PR with documented `size:exception` for over-budget PRs. One commit per work unit. Strict TDD.
+  License: MIT for the repo. Per-track licenses are independent and surfaced through `lofi credits` and the TUI attribution view.
+
+session:
+  execution_mode: interactive
+  artifact_store_mode: hybrid
+  chained_pr_strategy: ask-on-risk
+  review_budget_lines: 400
+
+testing:
+  strict_tdd: true
+  reason: Go stdlib `go test` configured in slice #1; domain TDD'd across all 11 chained PRs of slice #1 with consistent RED → GREEN per work unit
+  recommended_runner: go-test
+  test_command: "go test ./..."
+  coverage_command: "go test -cover ./..."
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Scope proposals to a single chained PR chain
+    - Honor slice #1 non-goals: no streaming, no scraping, no accounts, no telemetry, no GUI, no plugins
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+    - Reuse existing REQ-* / S-* identifiers from spec #287 (slice #1) when extending
+  design:
+    - Document architecture decisions with rationale
+    - Keep hexagonal ports stable: changes flow through `cmd/lofi` (composition root)
+  tasks:
+    - Group by PR with hierarchical numbering (e.g., `PR-A.1`, `PR-A.2`)
+    - Each task completable in one work-unit commit
+    - Tag tasks that touch the SHA baking pipeline (release-sensitive)
+    - Tag tasks that touch the license verification report contract
+  apply:
+    guidelines:
+      - Follow slice #1 commit-by-work-unit pattern
+      - Test FIRST (RED), then implement (GREEN); refactor last
+    tdd: true
+    test_command: "go test ./..."
+  verify:
+    test_command: "go test ./..."
+    build_command: "go build ./..."
+    vet_command: "go vet ./..."
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
+    - Per-track license status promotion requires a signed verification report

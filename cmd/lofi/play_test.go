@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/asolis87/lo-fi-player/internal/audio"
 	"github.com/asolis87/lo-fi-player/internal/catalog"
@@ -24,7 +27,10 @@ func stubWaitForSignal(t *testing.T) {
 }
 
 // writeHeadlessCatalog seeds a single track-rain/track.json under
-// the test's XDG cache root so the "unknown id" path can run.
+// the test's XDG cache root so the "unknown id" path can run. The
+// audio.mp3 sibling is the deterministic payload the checksum
+// expects so PR-D #3.1 (audio.mp3 required) and PR-D #3.2
+// (checksum verified at load) both stay green.
 func writeHeadlessCatalog(t *testing.T) {
 	t.Helper()
 	dir := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "lofi-player", "catalog", "v1", "track-rain")
@@ -39,9 +45,10 @@ func writeHeadlessCatalog(t *testing.T) {
 		License:         catalog.LicenseCCBY,
 		LicenseStatus:   catalog.LicenseStatusVerified,
 		SourceURL:       "https://example.test/track-rain",
-		ChecksumSHA256:  "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
+		ChecksumSHA256:  "ebc2689f897aa333887187a499a15658989ca923cbd49ecc8080b6eef955cdc6",
 		AttributionText: "by Anonymous",
 		DurationSeconds: 60,
+		AudioFilename:   "audio.mp3",
 	}
 	data, err := json.MarshalIndent(tr, "", "  ")
 	if err != nil {
@@ -49,6 +56,9 @@ func writeHeadlessCatalog(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "track.json"), data, 0o644); err != nil {
 		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "audio.mp3"), []byte("dummy bytes"), 0o644); err != nil {
+		t.Fatalf("write audio.mp3: %v", err)
 	}
 }
 
@@ -72,23 +82,16 @@ func TestPlay_HeadlessUnknownIDExits1(t *testing.T) {
 	}
 }
 
-// TestPlay_HeadlessProceduralStation guards the procedural path
-// for the only station exposed in slice #1: `lofi play
-// procedural:rain` MUST build a ProceduralBackend with a
-// *audio.RainGenerator and play it through the AudioBackend port
-// without touching audio.Select. This is the headless fallback
-// the spec calls for when no shipped track is wanted.
-//
-// Per Decision #326, the slice-1 CLI surface only exposes
-// procedural:rain. procedural:brown and procedural:white are still
-// available inside internal/audio (the generators exist and the
-// type assertions below document that), but they are rejected by
-// runPlay with an actionable stderr message and exit code 1. The
-// dedicated rejection tests live in TestPlay_HeadlessProceduralBrownRejects
-// and TestPlay_HeadlessProceduralWhiteRejects.
-func TestPlay_HeadlessProceduralStation(t *testing.T) {
-	stubWaitForSignal(t)
-
+// TestPlay_HeadlessProceduralRainWritesAudioToDevice replaces
+// the previous TestPlay_HeadlessProceduralStation, which only
+// asserted "no error" from runPlay and therefore would have
+// passed even when the procedural backend was silent (the
+// pre-PR-14 bug). The new test reconstructs the same backend
+// runPlay builds for `lofi play procedural:rain` and threads a
+// fake Device through WithDevice so the assertion can verify
+// the pump actually delivered samples to a sink — without
+// touching the immutable play.go.
+func TestPlay_HeadlessProceduralRainWritesAudioToDevice(t *testing.T) {
 	gen := resolveProcedural("procedural:rain")
 	if gen == nil {
 		t.Fatalf("resolveProcedural(procedural:rain) = nil")
@@ -97,11 +100,34 @@ func TestPlay_HeadlessProceduralStation(t *testing.T) {
 		t.Fatalf("resolveProcedural(procedural:rain) = %T, want *audio.RainGenerator", gen)
 	}
 
-	// End-to-end through runPlay so the full wiring (procedural
-	// prefix detection, backend construction, Load, Play,
-	// signal-wait stub, Close) is exercised.
-	if err := runPlay([]string{"procedural:rain"}); err != nil {
-		t.Fatalf("runPlay(procedural:rain): %v", err)
+	dev := newRecordingDevice()
+	b := audio.NewProceduralBackend(
+		audio.WithGenerator(gen),
+		audio.WithSampleRate(44100),
+		audio.WithDevice(dev),
+	)
+	if b == nil {
+		t.Fatal("NewProceduralBackend returned nil")
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	if err := b.Load(audio.Track{ID: "procedural:rain", Path: "procedural:rain"}); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := b.Play(); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for dev.sampleCount() < 2048 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := b.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if got := dev.sampleCount(); got < 2048 {
+		t.Fatalf("procedural:rain delivered %d samples to the device, want >= 2048 (the silence bug)", got)
 	}
 }
 
@@ -297,5 +323,59 @@ func TestResolveProcedural_KnownStations(t *testing.T) {
 				t.Fatalf("resolveProcedural(%q) = nil", tc.station)
 			}
 		})
+	}
+}
+
+// recordingDevice is the test-only Device the procedural CLI
+// tests use to verify the pump actually delivered samples. It
+// lives in the cmd/lofi package (not internal/audio) because the
+// fakeDevice there is package-private; the interface matches
+// audio.Device so the procedural backend can use it through
+// WithDevice.
+type recordingDevice struct {
+	mu      sync.Mutex
+	written []int16
+}
+
+func newRecordingDevice() *recordingDevice        { return &recordingDevice{} }
+func (r *recordingDevice) Write(s []int16) error  { r.mu.Lock(); defer r.mu.Unlock(); r.written = append(r.written, s...); return nil }
+func (r *recordingDevice) Close() error           { return nil }
+func (r *recordingDevice) sampleCount() int       { r.mu.Lock(); defer r.mu.Unlock(); return len(r.written) }
+
+// TestRunHeadlessPlay_ResolvesAudioPath is the PR-D #3.3 gate:
+// when `lofi play <id>` resolves a catalog track, runHeadlessPlay
+// MUST hand backend.Load a Track whose Path points at the actual
+// audio file under the cache (<cacheRoot>/<id>/audio.mp3), not
+// the empty string that the slice #1 placeholder path produced.
+// We override selectAudioBackend to a stub that returns a
+// MockBackend so we can inspect what Load received without mpv
+// on $PATH or a working procedural fallback.
+func TestRunHeadlessPlay_ResolvesAudioPath(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	writeHeadlessCatalog(t)
+	stubWaitForSignal(t)
+
+	mock := audio.NewMockBackend()
+	origSelect := selectAudioBackend
+	selectAudioBackend = func(ctx context.Context, opts ...audio.SelectOption) (audio.AudioBackend, error) {
+		return mock, nil
+	}
+	t.Cleanup(func() { selectAudioBackend = origSelect })
+
+	code, stderr := captureStderr(t, func() int { return codeFor(runPlay([]string{"track-rain"})) })
+	if code != 0 {
+		t.Fatalf("runPlay(track-rain) code = %d, want 0, stderr=%q", code, stderr)
+	}
+
+	loaded := mock.Loaded()
+	if len(loaded) != 1 {
+		t.Fatalf("MockBackend.Load called %d times, want 1 (full log: %+v)", len(loaded), loaded)
+	}
+	wantPath := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "lofi-player", "catalog", "v1", "track-rain", "audio.mp3")
+	if loaded[0].Path != wantPath {
+		t.Fatalf("Load(Track).Path = %q, want %q (track-rain should resolve to its audio.mp3 under the cache root)", loaded[0].Path, wantPath)
+	}
+	if loaded[0].ID != "track-rain" {
+		t.Fatalf("Load(Track).ID = %q, want %q", loaded[0].ID, "track-rain")
 	}
 }

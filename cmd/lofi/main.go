@@ -18,6 +18,7 @@ Usage:
   lofi list
   lofi credits [--json]
   lofi sync
+  lofi verify-release-binary <path> <expected-SHA>
 
 Run a subcommand. Without arguments, or with an unknown subcommand,
 lofi prints this message and exits with code 2.
@@ -44,6 +45,8 @@ func run(args []string) int {
 		return codeFor(runList(rest))
 	case "sync":
 		return codeFor(runSync(rest))
+	case "verify-release-binary":
+		return codeFor(runVerifyReleaseBinary(rest))
 	default:
 		fmt.Fprintf(os.Stderr, "lofi: unknown subcommand %q\n\n%s", subcommand, usage)
 		return 2

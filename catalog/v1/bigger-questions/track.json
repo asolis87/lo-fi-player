@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "bigger-questions",
+  "title": "Bigger Questions",
+  "artist": "Lee Rosevere",
+  "license": "CC-BY",
+  "license_status": "VERIFIED",
+  "source_url": "https://archive.org/details/leerosevere_musicforpodcasts_6",
+  "checksum_sha256": "2619c8d0b2234dda9ee6b8f38763f26f72808270c8f7b249b70a838484ec0a4e",
+  "attribution_text": "\"Bigger Questions\" by Lee Rosevere, licensed CC BY 4.0. Source: https://archive.org/details/leerosevere_musicforpodcasts_6",
+  "duration_seconds": 171,
+  "audio_filename": "audio.mp3"
+}

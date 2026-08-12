@@ -15,18 +15,21 @@ import (
 // tag, or "latest" ref here — REQ-CAT-3 forbids floating refs.
 const FirstRunFetchURLTemplate = "https://raw.githubusercontent.com/%s/%s/%s/catalog/v1/manifest.json"
 
-// FirstRunCommitSHA is the commit SHA baked into the binary that
-// pins the first published manifest. It MUST stay a 40-char
-// lowercase hex string; if it ever points at a wrong commit, the
-// only remediation is a new release publishing the corrected SHA
-// (decision #289). The placeholder below is replaced by the
-// release pipeline when the catalog/v1/ seed lands in PR #10.
+// FirstRunCommitSHA es el SHA de commit horneado en el binario que
+// pinnea el primer manifest publicado. DEBE permanecer como un
+// string hex lowercase de 40 chars; si alguna vez apunta a un
+// commit incorrecto, la unica remediacion es un nuevo release
+// publicando el SHA corregido (decision #289). El placeholder de
+// abajo es reemplazado por el pipeline de release (PR-E,
+// `.github/workflows/release.yml`) al compilar cualquier tag `v*`
+// con `-ldflags "-X ...FirstRunCommitSHA=<sha>"`.
 //
-// Declared as a var (not const) so PR #9's runSync tests can
-// override the value with a valid SHA without spinning up an
-// httptest server just to satisfy URL validation. Production code
-// never reassigns this; the release pipeline writes the real SHA
-// into this same symbol.
+// Declarada como `var` (no `const`) para que los tests de
+// `cmd/lofi/sync_test.go` puedan sobrescribir el valor con un SHA
+// valido sin necesidad de levantar un httptest server solo para
+// satisfacer `ValidateURL`. El codigo de produccion nunca la
+// reasigna; el pipeline de release es el unico escritor sancionado
+// sobre este mismo simbolo.
 var FirstRunCommitSHA = "<PLACEHOLDER_SHA>"
 
 // ErrFloatRef is wrapped around every ValidateURL failure whose

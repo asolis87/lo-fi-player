@@ -224,6 +224,107 @@ func TestSync_OfflineDoesNotMutateCache(t *testing.T) {
 	}
 }
 
+// TestSync_HappyPath_RoundTrip is PR-E's integration gate (task
+// 4.5): an end-to-end Sync against an httptest.Server that serves
+// a valid catalog MUST write the manifest to the cache dir
+// atomically, leave no stale staging files, and make the manifest
+// visible to a follow-up LoadFromFile. The transport that bridges
+// the pinned-SHA URL onto the test server (urlRewriteTransport
+// below) is the same one the offline-test paths use; this test
+// proves the same plumbing lights up cleanly when the server
+// returns a well-formed body.
+func TestSync_HappyPath_RoundTrip(t *testing.T) {
+	want := validCatalog()
+	body, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	syn := NewSyncer(dir)
+	syn.HTTPClient = &http.Client{Transport: urlRewriteTransport{target: srv.URL}}
+	url := pinnedSHAURL(t, srv.URL)
+
+	if err := syn.Sync(context.Background(), url); err != nil {
+		t.Fatalf("Sync(happy path) = %v, want nil", err)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("server hit %d times, want exactly 1 (Fetch+Apply, no retries)", got)
+	}
+
+	target := filepath.Join(dir, "manifest.json")
+	gotBytes, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read cache manifest: %v", err)
+	}
+	var got Catalog
+	if err := json.Unmarshal(gotBytes, &got); err != nil {
+		t.Fatalf("cache manifest is not parseable JSON: %v\n%s", err, gotBytes)
+	}
+	if got.SchemaVersion != want.SchemaVersion || got.Version != want.Version {
+		t.Fatalf("round-tripped catalog = %+v, want %+v", got, want)
+	}
+	if len(got.Tracks) != 1 || got.Tracks[0].ID != want.Tracks[0].ID {
+		t.Fatalf("round-tripped tracks = %+v, want single track id=%q", got.Tracks, want.Tracks[0].ID)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", dir, err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			t.Fatalf("leftover staging file after happy path: %s", e.Name())
+		}
+	}
+}
+
+// TestSync_AppliesRealManifest proves that after a successful
+// end-to-end Sync, the file LoadFromFile reads back is the SAME
+// manifest body the server returned (byte-for-byte), so the
+// runtime contract "the cache IS the pinned manifest" holds.
+func TestSync_AppliesRealManifest(t *testing.T) {
+	want := validCatalog()
+	body, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	syn := NewSyncer(dir)
+	syn.HTTPClient = &http.Client{Transport: urlRewriteTransport{target: srv.URL}}
+	url := pinnedSHAURL(t, srv.URL)
+
+	if err := syn.Sync(context.Background(), url); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	loaded, err := LoadFromFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("LoadFromFile on synced cache: %v", err)
+	}
+	if loaded.Version != want.Version {
+		t.Fatalf("loaded.Version = %q, want %q", loaded.Version, want.Version)
+	}
+	if len(loaded.Tracks) != 1 || loaded.Tracks[0].ID != want.Tracks[0].ID {
+		t.Fatalf("loaded.Tracks = %+v, want single track id=%q", loaded.Tracks, want.Tracks[0].ID)
+	}
+}
+
 // pinnedSHAURL builds the immutable manifest URL ValidateURL
 // requires, pointed at the httptest server. The URL the test
 // server actually answers lives at srv.URL (a 127.0.0.1:port
