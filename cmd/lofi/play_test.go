@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/asolis87/lo-fi-player/internal/audio"
 	"github.com/asolis87/lo-fi-player/internal/catalog"
+	"github.com/asolis87/lo-fi-player/internal/config"
 	"github.com/asolis87/lo-fi-player/internal/tui"
 )
 
@@ -278,6 +280,150 @@ func TestPlay_LaunchesTUIWhenNoArgs(t *testing.T) {
 	}
 	if stub.model.Mode != tui.ModeNoCatalog {
 		t.Fatalf("TUI Model.Mode = %v, want ModeNoCatalog (no catalog seeded)", stub.model.Mode)
+	}
+}
+
+// catalogForResumeStub swaps loadCatalogForResume for fn and
+// restores the default on cleanup.
+func catalogForResumeStub(t *testing.T, fn func() (*catalog.Catalog, error)) {
+	t.Helper()
+	orig := loadCatalogForResume
+	loadCatalogForResume = fn
+	t.Cleanup(func() { loadCatalogForResume = orig })
+}
+
+// stateForResumeWithVolumeAndHistory construye un PlaybackState
+// minimo sin tocar disco ni XDG_CONFIG_HOME.
+func stateForResumeWithVolumeAndHistory(t *testing.T, volume int, history []string) *config.PlaybackState {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Volume = volume
+	cfg.History = append([]string{}, history...)
+	return config.NewPlaybackState(cfg)
+}
+
+// TestResumeTTY_Accept_Hydrates: RESUME-1 s1. TTY + 'y' hidrata
+// volumen efectivo y Mode Now-Playing (catalog presente).
+func TestResumeTTY_Accept_Hydrates(t *testing.T) {
+	stub := &stubLauncher{err: nil}
+	withStubLauncher(t, stub)
+
+	withStdinIsTTYStub(t, true)
+	withResumeReaderStub(t, bytes.NewReader([]byte{'y'}))
+	withLoadStateForResumeStub(t, func() *config.PlaybackState {
+		return stateForResumeWithVolumeAndHistory(t, 72, []string{"A", "B"})
+	})
+	catalogForResumeStub(t, func() (*catalog.Catalog, error) {
+		return &catalog.Catalog{Tracks: []catalog.Track{{ID: "A"}, {ID: "B"}}}, nil
+	})
+
+	code, stderr := captureStderr(t, func() int { return codeFor(runPlay(nil)) })
+	if code != 0 {
+		t.Fatalf("runPlay(nil) code = %d, want 0 (stderr=%q)", code, stderr)
+	}
+	if !stub.called || stub.model.Volume != 72 || stub.model.Mode != tui.ModeNowPlaying {
+		t.Fatalf("hydrated model wrong: called=%v vol=%d mode=%v", stub.called, stub.model.Volume, stub.model.Mode)
+	}
+}
+
+// TestResumeTTY_Decline_ClearsHistoryKeepsVolume: RESUME-1 s2.
+// Declinacion preserva volumen y vacia historia.
+func TestResumeTTY_Decline_ClearsHistoryKeepsVolume(t *testing.T) {
+	stub := &stubLauncher{err: nil}
+	withStubLauncher(t, stub)
+
+	withStdinIsTTYStub(t, true)
+	withResumeReaderStub(t, bytes.NewReader([]byte{'n'}))
+	original := stateForResumeWithVolumeAndHistory(t, 65, []string{"A", "B", "C"})
+	withLoadStateForResumeStub(t, func() *config.PlaybackState { return original })
+	catalogForResumeStub(t, func() (*catalog.Catalog, error) {
+		return &catalog.Catalog{Tracks: []catalog.Track{{ID: "A"}}}, nil
+	})
+
+	code, _ := captureStderr(t, func() int { return codeFor(runPlay(nil)) })
+	if code != 0 {
+		t.Fatalf("runPlay(nil) code = %d, want 0", code)
+	}
+	if stub.model.Volume != 65 {
+		t.Fatalf("Volume = %d, want 65 (declined but preserved)", stub.model.Volume)
+	}
+	if len(original.History()) != 3 {
+		t.Fatalf("original.History() length = %d, want 3 (declination must not mutate)", len(original.History()))
+	}
+	dec, err := decideResumeState(original, nil)
+	if err != nil || dec == nil || len(dec.History()) != 0 || dec.EffectiveVolume() != 65 {
+		t.Fatalf("decideResumeState(decline) wrong: err=%v dec=%v history=%v vol=%d", err, dec, dec.History(), dec.EffectiveVolume())
+	}
+}
+
+// TestResumeNonTTY_AutoHydratesNoStdinRead: RESUME-2. Non-TTY
+// hidrata silenciosamente y NUNCA lee stdin.
+func TestResumeNonTTY_AutoHydratesNoStdinRead(t *testing.T) {
+	stub := &stubLauncher{err: nil}
+	withStubLauncher(t, stub)
+
+	reader := newCountingReader()
+	withStdinIsTTYStub(t, false)
+	withResumeReaderStub(t, reader)
+	withLoadStateForResumeStub(t, func() *config.PlaybackState {
+		return stateForResumeWithVolumeAndHistory(t, 80, []string{"A", "B"})
+	})
+	catalogForResumeStub(t, func() (*catalog.Catalog, error) {
+		return &catalog.Catalog{Tracks: []catalog.Track{{ID: "A"}}}, nil
+	})
+
+	code, _ := captureStderr(t, func() int { return codeFor(runPlay(nil)) })
+	if code != 0 || !stub.called || stub.model.Volume != 80 || reader.Calls() != 0 {
+		t.Fatalf("non-TTY wrong: code=%d called=%v vol=%d reads=%d", code, stub.called, stub.model.Volume, reader.Calls())
+	}
+}
+
+// TestExplicitID_BypassesResumePrompt: explicit-id-wins. `lofi
+// play <id>` no consulta stdin ni dispara TUI launcher.
+func TestExplicitID_BypassesResumePrompt(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	writeHeadlessCatalog(t)
+	stubWaitForSignal(t)
+
+	reader := newCountingReader()
+	withStdinIsTTYStub(t, true)
+	withResumeReaderStub(t, reader)
+	withLoadStateForResumeStub(t, func() *config.PlaybackState {
+		return stateForResumeWithVolumeAndHistory(t, 72, []string{"A"})
+	})
+
+	stub := &stubLauncher{err: nil}
+	withStubLauncher(t, stub)
+
+	code, stderr := captureStderr(t, func() int { return codeFor(runPlay([]string{"track-rain"})) })
+	if code != 0 {
+		t.Fatalf("runPlay(track-rain) code = %d, want 0 (stderr=%q)", code, stderr)
+	}
+	if stub.called || reader.Calls() != 0 {
+		t.Fatalf("explicit-id wrong: tui_called=%v stdin_reads=%d", stub.called, reader.Calls())
+	}
+}
+
+// TestResumeTTY_NoPriorState_NoPrompt: sin estado previo no se
+// consulta stdin ni se construye state.
+func TestResumeTTY_NoPriorState_NoPrompt(t *testing.T) {
+	stub := &stubLauncher{err: nil}
+	withStubLauncher(t, stub)
+
+	reader := newCountingReader()
+	withStdinIsTTYStub(t, true)
+	withResumeReaderStub(t, reader)
+	withLoadStateForResumeStub(t, func() *config.PlaybackState { return nil })
+	catalogForResumeStub(t, func() (*catalog.Catalog, error) {
+		return &catalog.Catalog{Tracks: []catalog.Track{{ID: "A"}}}, nil
+	})
+
+	code, _ := captureStderr(t, func() int { return codeFor(runPlay(nil)) })
+	if code != 0 || !stub.called || reader.Calls() != 0 {
+		t.Fatalf("no-prior-state wrong: code=%d called=%v reads=%d", code, stub.called, reader.Calls())
+	}
+	if stub.model.Volume != config.DefaultVolume {
+		t.Fatalf("Volume = %d, want %d (no prior state -> default)", stub.model.Volume, config.DefaultVolume)
 	}
 }
 
