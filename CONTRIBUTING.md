@@ -1,119 +1,125 @@
-# Contributing to lo-fi-player
+# Contribuir a lo-fi-player
 
-Thanks for your interest in `lo-fi-player`. This guide is the
-contract between every contributor and every reviewer. It is short
-on purpose: every rule here exists because the change chain forced
-it.
+Gracias por tu interes en `lo-fi-player`. Esta guia es el contrato
+entre cada contribuidor y cada revisor. Es corta a proposito: cada
+regla aqui existe porque la cadena de cambios la forzo.
 
-## Ground rules
+## Reglas base
 
-1. **One work unit per commit.** Each commit is a deliverable
-   behaviour, fix, migration, or docs unit — not a file-type bucket.
-   Tests and docs for that unit live in the same commit.
-2. **Stay inside the 400-line review budget.** Authored additions
-   plus deletions for any single PR must stay near or below 400
-   lines. If the slice is bigger, split it into a chained PR before
-   opening the request.
-3. **Follow the chain strategy.** `lo-fi-player` uses a
-   **feature-branch chain**: a tracker branch (`feat/lo-fi-player`)
-   aggregates the slice, and every child PR targets the immediate
-   previous PR branch. Child PRs never target `main` directly.
-4. **Defer detail to the spec.** When in doubt, read
-   `sdd/lo-fi-player/spec` and `sdd/lo-fi-player/design`. The spec
-   is the acceptance criteria; the design is the architectural
-   boundary. A PR that contradicts either must justify the change
-   in the description.
-5. **No AI co-author trailers.** Commit messages must follow the
-   Conventional Commits format below. Do not include `Co-Authored-By:
-   ...` or any AI-assist attribution.
+1. **Una unidad de trabajo por commit.** Cada commit es un
+   entregable de comportamiento, fix, migracion o unidad documental;
+   no es una cubeta por tipo de archivo. Las pruebas y la
+   documentacion de esa unidad viven en el mismo commit.
+2. **Mantenerse dentro del presupuesto de revision de 400 lineas.**
+   Las adiciones y borrados autorales de cualquier PR deben rondar
+   o quedar por debajo de 400 lineas. Si el slice es mas grande,
+   partirlo en una cadena de PRs antes de abrir el request.
+3. **Seguir la estrategia de cadena.** `lo-fi-player` usa una
+   **cadena feature-branch**: una rama trackera (`feat/lo-fi-player`)
+   agrega el slice y cada PR hijo apunta contra la rama del PR
+   previo inmediato. Los PRs hijos nunca apuntan contra `main`
+   directamente. La rama trackera `feat/lo-fi-player` esta
+   reservada: nunca se usa como destino de un PR hijo individual.
+4. **Deferir el detalle a la spec.** Cuando tengas duda, lee
+   `openspec/specs/<capacidad>/spec.md` (las specs delta viven bajo
+   `openspec/specs/` y los snapshots historicos bajo
+   `openspec/changes/archive/`). La spec es el criterio de
+   aceptacion; un PR que la contradiga debe justificarlo en la
+   descripcion.
+5. **Sin trailers de co-autoria IA.** Los mensajes de commit deben
+   seguir el formato de Conventional Commits de abajo. No incluyas
+   `Co-Authored-By:` ni ninguna atribucion de asistencia IA.
 
-## Branch naming
+## Nombres de rama
 
-Branch names encode the PR slice and the area of work. The format
-is:
+Los nombres de rama codifican el numero de PR y el area de trabajo.
+El formato es:
 
 ```text
-<type>/pr-<number>-<short-kebab-slug>
+<type>/pr-<numero>-<short-kebab-slug>
 ```
 
-| Segment | Rule | Example |
+| Segmento | Regla | Ejemplo |
 | --- | --- | --- |
-| `<type>` | One of `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `build`, `perf`. | `feat`, `chore` |
-| `pr-<number>` | The zero-padded PR number from the chained-PR plan in `sdd/lo-fi-player/tasks`. PR #0 is the bootstrap. | `pr-0`, `pr-1` |
-| `<short-kebab-slug>` | Lower-kebab summary of the slice (≤ 4 words). | `pr-0-bootstrap`, `mpv-ipc-adapter` |
+| `<type>` | Uno de `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `build`, `perf`. | `feat`, `chore` |
+| `pr-<numero>` | Numero de PR con cero a la izquierda del plan encadenado. PR #0 es el bootstrap. | `pr-0`, `pr-1` |
+| `<short-kebab-slug>` | Resumen en lower-kebab del slice (<= 4 palabras). | `pr-0-bootstrap`, `mpv-ipc-adapter` |
 
-Worked examples from slice #1:
+Ejemplos trabajados:
 
-- `feat/pr-0-bootstrap` — repository bootstrap (this PR).
-- `feat/pr-1-go-skeleton` — Go module + `cmd/lofi` skeleton + `AudioBackend` port.
-- `feat/pr-5-catalog-loader` — catalog loader + checksum verification.
-- `fix/pr-7-credits-prefix` — a focused fix inside PR #7's slice.
+- `feat/pr-0-bootstrap` — bootstrap del repositorio.
+- `feat/pr-1-go-skeleton` — modulo Go + esqueleto `cmd/lofi` +
+  puerto `AudioBackend`.
+- `feat/pr-5-catalog-loader` — loader de catalogo + verificacion de
+  checksum.
+- `fix/pr-7-credits-prefix` — fix focal dentro del slice de PR #7.
+- `feat/pr-A-licit-catalog` — slice #2, PR-A (seed verificado).
 
-The feature tracker's name is reserved: `feat/lo-fi-player` is the
-aggregation branch for the entire slice and is never used for a
-child PR.
+La rama trackera `feat/lo-fi-player` esta reservada y nunca se usa
+como destino de un PR hijo.
 
-## Commit messages — Conventional Commits
+## Mensajes de commit — Conventional Commits
 
-Every commit message **must** follow the
-[Conventional Commits 1.0.0](https://www.conventionalcommits.org/)
-specification. The header line is the contract; the body explains
-the *why* and the reviewer hand-off.
+Cada mensaje de commit **debe** seguir la especificacion
+[Conventional Commits 1.0.0](https://www.conventionalcommits.org/).
+El header es el contrato; el body explica el *por que* y el hand-off
+al revisor.
 
-### Format
+### Formato
 
 ```text
-<type>(<optional-scope>): <imperative summary>
+<type>(<scope-opcional>): <resumen imperativo>
 
-<body — what & why, not what files changed>
+<body — que y por que, no que archivos cambiaron>
 
-<footer — references, breaking changes, reviewers>
+<footer — referencias, breaking changes, reviewers>
 ```
 
-### Allowed `<type>` values
+### Valores de `<type>` permitidos
 
-| Type | When to use |
+| Type | Cuando usarlo |
 | --- | --- |
-| `feat` | A new user-visible behaviour, command, view, or API. |
-| `fix` | A bug fix that changes user-visible behaviour. |
-| `refactor` | Internal restructuring with no user-visible change. |
-| `perf` | A change that improves a measurable performance metric. |
-| `test` | Adding or fixing tests with no production change. |
-| `docs` | Documentation-only change (README, CONTRIBUTING, design notes). |
-| `chore` | Tooling, repository metadata, build glue. No production code. |
-| `ci` | CI workflow files and CI-only changes. |
-| `build` | Build system, dependency pinning, version bumps. |
-| `revert` | A revert of a previous commit; body must reference the SHA. |
+| `feat` | Comportamiento nuevo visible para el usuario: comando, vista o API. |
+| `fix` | Bug fix que cambia comportamiento visible al usuario. |
+| `refactor` | Reestructuracion interna sin cambio visible al usuario. |
+| `perf` | Cambio que mejora una metrica medible de performance. |
+| `test` | Agregar o arreglar pruebas sin cambio de produccion. |
+| `docs` | Cambio solo de documentacion (README, CONTRIBUTING, design notes). |
+| `chore` | Tooling, metadata del repo, glue de build. Sin codigo de produccion. |
+| `ci` | Workflows de CI y cambios solo-CI. |
+| `build` | Sistema de build, pinning de dependencias, bumps de version. |
+| `revert` | Revertir un commit previo; el body debe referenciar el SHA. |
 
-### Optional `<scope>`
+### `<scope>` opcional
 
-The scope is a short noun that names the area of the codebase.
-Use lowercase, single-token scopes that match the planned module
-names. Examples: `audio`, `catalog`, `config`, `tui`, `cli`,
-`credits`, `sync`, `bootstrap`.
+El scope es un sustantivo corto que nombra el area del codebase.
+Usa scopes lowercase de un solo token que coincidan con los nombres
+de modulos planeados. Ejemplos: `audio`, `catalog`, `config`, `tui`,
+`cli`, `credits`, `sync`, `bootstrap`.
 
-### The body
+### El body
 
-The body answers three reviewer questions:
+El body responde tres preguntas del revisor:
 
-1. **What** did this commit deliver in one sentence?
-2. **Why** was it needed (link to the spec scenario, design
-   decision, or risk it closes)?
-3. **What is the rollback boundary** (which files / behaviour can
-   be reverted without removing unrelated work)?
+1. **Que** entrego este commit en una oracion?
+2. **Por que** fue necesario (link al escenario de la spec, decision
+   de diseno, o riesgo que cierra)?
+3. **Cual es el limite de rollback** (que archivos / comportamiento
+   se pueden revertir sin remover trabajo no relacionado)?
 
-### The footer
+### El footer
 
-Use the footer for:
+Usa el footer para:
 
-- `Refs:` references to spec IDs (e.g. `Refs: REQ-CLI-1, S-CLI-1`).
-- `Closes:` references to GitHub issues.
-- `BREAKING CHANGE:` paragraphs, when the commit forces a migration.
+- `Refs:` referencias a IDs de spec (por ejemplo `Refs: REQ-CLI-1,
+  S-CLI-1`).
+- `Closes:` referencias a GitHub issues.
+- Parrafos `BREAKING CHANGE:` cuando el commit fuerce una migracion.
 
-Do **not** add `Co-Authored-By:` trailers, including any generated
-by AI tools.
+**No** agregues trailers `Co-Authored-By:`, incluyendo los generados
+por herramientas de IA.
 
-### Worked examples
+### Ejemplos trabajados
 
 ```text
 feat(audio): add AudioBackend port and mock for the lo-fi-player
@@ -142,28 +148,71 @@ Refs: REQ-FCH-1
 
 ## Pull requests
 
-1. **One PR per work unit.** Use the chained-PR plan in
-   `sdd/lo-fi-player/tasks` to find your PR number and slice.
-2. **Branch from the previous PR's branch**, not from `main`.
-   Feature-branch chain means each PR is a delta on top of the
-   previous one.
-3. **PR title is the Conventional Commits header.** The PR title
-   doubles as the squash-merge commit subject; keep it under 72
-   characters.
-4. **PR description cites the spec.** Link the requirements and
-   scenarios the PR closes. If the PR deviates from the design,
-   justify the deviation in the description *before* requesting
+1. **Un PR por unidad de trabajo.** Usa el plan de PRs encadenados
+   en `openspec/changes/archive/<slice>/tasks.md` para localizar el
+   numero y el slice del PR.
+2. **Brancheo desde la rama del PR previo**, no desde `main`. La
+   cadena feature-branch significa que cada PR es un delta sobre el
+   anterior.
+3. **El titulo del PR es el header de Conventional Commits.** El
+   titulo del PR hace doble funcion como subject del commit squash;
+   mantenlo bajo 72 caracteres.
+4. **La descripcion del PR cita la spec.** Linkea los requirements y
+   scenarios que el PR cierra. Si el PR se desvía del diseno,
+   justifica la desviacion en la descripcion *antes* de pedir
    review.
-5. **CI must be green.** The pipeline stubs in PR #0 deliberately
-   fail until the Go module lands; from PR #1 onward, `go vet`,
-   `go build`, and `go test` must all pass.
-6. **Update the spec-driven artefacts if the contract changes.**
-   Any user-visible contract change must travel with the spec
-   delta, not behind it.
+5. **CI debe estar en verde.** El pipeline stub en PR #0 falla a
+   proposito hasta que aterriza el modulo Go; desde PR #1 en
+   adelante `go vet`, `go build` y `go test` deben pasar todos.
+6. **Actualiza los artefactos spec-driven si el contrato cambia.**
+   Cualquier cambio de contrato visible al usuario debe viajar con
+   el delta de spec, no por detras de el.
 
-## Local checks
+## Builds de release manuales (PR-E)
 
-Before pushing a branch, run the same gates the CI runs:
+Ademas del pipeline tag-triggered (`.github/workflows/release.yml`),
+puedes producir y verificar un binario de release localmente.
+Esto es util para reproduccion de incidentes, debug de un SHA
+especifico, o para mantener el catalogo sin abrir un tag `v*`.
+
+```bash
+# Resolver el SHA de catalog/v1/manifest.json en el HEAD actual
+MANIFEST_SHA=$(git rev-parse HEAD:catalog/v1/manifest.json)
+
+# Compilar con el SHA horneado en internal/catalog.FirstRunCommitSHA
+go build \
+    -ldflags "-X github.com/asolis87/lo-fi-player/internal/catalog.FirstRunCommitSHA=$MANIFEST_SHA" \
+    -o lofi-release \
+    ./cmd/lofi
+
+# Verificar: runtime SHA == SHA esperado
+./scripts/verify-release.sh ./lofi-release "$MANIFEST_SHA"
+```
+
+`scripts/verify-release.sh` delega en
+`lofi verify-release-binary <bin> <sha>`, asi el camino bash y las
+pruebas Go unitarias comparten la misma implementacion
+(`internal/catalog.VerifyBakedSHA`). El gate lee el valor runtime
+del simbolo `FirstRunCommitSHA` mediante `debug/{macho,elf,pe}` y
+lo compara contra el SHA esperado. Esta implementacion sustituye
+al gate previo `strings <bin> | grep <PLACEHOLDER_SHA>` que estaba
+roto: el linker de Go conserva el literal del codigo fuente en
+rodata adyacente al valor runtime reescrito, y la busqueda por
+substring marcaba como fallido a todo binario correctamente
+horneado.
+
+Codigos de salida del gate:
+
+| Codigo | Significado |
+| --- | --- |
+| 0 | El SHA runtime coincide con el esperado. Release OK. |
+| 1 | El binario es ilegible, lleva el literal placeholder, o el SHA runtime no coincide. Release bloqueado. |
+| 2 | Error de invocacion (arity incorrecta, archivo no regular). |
+
+## Checks locales
+
+Antes de hacer push de una rama, corre las mismas puertas que corre
+la CI:
 
 ```bash
 go vet ./...
@@ -171,12 +220,12 @@ go build ./...
 go test ./...
 ```
 
-PR #0 is the only PR where these commands fail with a "no main
-module" message; that is expected and documented in `README.md`.
+PR #0 es el unico PR donde estos comandos fallan con un mensaje de
+"no main module"; eso es esperado y esta documentado en `README.md`.
 
-## Code of conduct
+## Codigo de conducta
 
-Be kind, be precise, and assume good faith. Reviewers should
-explain the *why* behind every requested change; contributors
-should answer the *why* behind every implementation. Disagreement
-is welcome — silence is not.
+Se amable, se preciso y asume buena fe. Los revisores deben explicar
+el *por que* detras de cada pedido de cambio; los contribuidores
+deben responder el *por que* detras de cada implementacion. El
+desacuerdo es bienvenido — el silencio no.

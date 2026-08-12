@@ -1,34 +1,35 @@
 // Release-binary verification gate for the catalog seed SHA.
 //
-// The release pipeline (release.yml) builds a binary via
+// The release pipeline (`.github/workflows/release.yml`) builds a
+// binary via
 // `go build -ldflags "-X ...FirstRunCommitSHA=<sha>"` and runs
-// scripts/verify-release.sh against it before uploading. This
+// `scripts/verify-release.sh` against it before uploading. This
 // file gives the same gate a Go-callable surface so unit tests
 // can exercise it without spawning a shell.
 //
-// Spec background (openspec/changes/slice-2/specs/release-sha-bake/spec.md):
+// Spec background (`openspec/specs/release-sha-bake/spec.md`):
 // a release MUST be blocked if the runtime value of
-// FirstRunCommitSHA equals the placeholder literal
+// `FirstRunCommitSHA` equals the placeholder literal
 // `<PLACEHOLDER_SHA>` (the value it ships with from
-// pinning.go) or does not equal the SHA the release pipeline
-// baked. VerifyBakedSHA is the Go-callable form of that gate:
+// `pinning.go`) or does not equal the SHA the release pipeline
+// baked. `VerifyBakedSHA` is the Go-callable form of that gate:
 // it parses the runtime symbol from the binary via
-// debug/{macho,elf,pe}, dereferences the string data pointer,
+// `debug/{macho,elf,pe}`, dereferences the string data pointer,
 // and compares the resulting bytes against the expected SHA.
 //
 // Why this implementation is not a `strings | grep`-style test:
 //
-// The previous release gate (VerifyNoPlaceholder, PR-E #4.3)
+// The previous release gate (`VerifyNoPlaceholder`, PR-E #4.3)
 // scanned the binary's bytes for the literal `<PLACEHOLDER_SHA>`
 // and rejected any binary that contained it. That gate kept
 // flagging correctly baked binaries because the Go linker
 // preserves the source-code literal in rodata ADJACENT to the
 // runtime value of the rewritten string variable; the substring
 // search reads the literal bytes from rodata even though the
-// runtime value at FirstRunCommitSHA points to a freshly
+// runtime value at `FirstRunCommitSHA` points to a freshly
 // allocated rodata block holding the baked SHA. The grep gate
 // was unwound in favour of the symbol-table read implemented by
-// VerifyBakedSHA, which sees the runtime value rather than the
+// `VerifyBakedSHA`, which sees the runtime value rather than the
 // linker-preserved literal.
 package catalog
 
