@@ -29,9 +29,10 @@ func writeListCatalog(t *testing.T) {
 			License:         catalog.LicenseCCBY,
 			LicenseStatus:   catalog.LicenseStatusVerified,
 			SourceURL:       "https://example.test/" + id,
-			ChecksumSHA256:  "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12",
+			ChecksumSHA256:  "ebc2689f897aa333887187a499a15658989ca923cbd49ecc8080b6eef955cdc6",
 			AttributionText: "by Artist " + id,
 			DurationSeconds: 60,
+			AudioFilename:   "audio.mp3",
 		}
 		data, err := json.MarshalIndent(tr, "", "  ")
 		if err != nil {
@@ -39,6 +40,9 @@ func writeListCatalog(t *testing.T) {
 		}
 		if err := os.WriteFile(filepath.Join(dir, "track.json"), data, 0o644); err != nil {
 			t.Fatalf("write %s: %v", id, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "audio.mp3"), []byte("dummy bytes"), 0o644); err != nil {
+			t.Fatalf("write audio.mp3 for %s: %v", id, err)
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -16,6 +17,14 @@ import (
 	"github.com/asolis87/lo-fi-player/internal/config"
 	"github.com/asolis87/lo-fi-player/internal/tui"
 )
+
+// selectAudioBackend is the package-level injection seam for
+// audio.Select. Production wires it to audio.Select so the
+// adapter probe runs; tests swap it for a stub that returns a
+// deterministic AudioBackend (typically a MockBackend) so they
+// can capture the Track passed to Load without needing mpv on
+// $PATH or a working procedural fallback.
+var selectAudioBackend = audio.Select
 
 // tuiLauncher runs the Bubble Tea program. Tests swap it for a
 // stub so they can capture the model without taking over the
@@ -78,28 +87,36 @@ func runHeadlessPlay(target string) error {
 	// PR #10+ work.
 	_ = config.LoadOrDefault()
 
-	backend, err := resolveHeadlessBackend(target)
+	backend, audioPath, err := resolveHeadlessBackend(target)
 	if err != nil {
 		return err
 	}
-	return playBackend(backend, target)
+	return playBackend(backend, target, audioPath)
 }
 
 // resolveHeadlessBackend picks the AudioBackend that will serve
-// the headless invocation:
+// the headless invocation and the on-disk path of the audio
+// bytes (empty for procedural targets). See selectBackendForCatalogTrack
+// for the audioPath semantics.
 //
 //   - target starts with "procedural:": construct a
 //     ProceduralBackend directly with the matching generator;
 //     audio.Select is intentionally NOT called so a missing mpv
-//     cannot break ambient-noise playback.
+//     cannot break ambient-noise playback. audioPath is "" because
+//     the procedural backends synthesize samples, they don't read
+//     files.
 //   - otherwise: load the on-disk catalog, look up the track by
 //     id, and call audio.Select with the mpv factory wired in.
 //     A missing catalog surfaces a `lofi sync` hint; a missing
 //     track surfaces the offending id; ErrNoAudioBackend surfaces
 //     an actionable install hint.
-func resolveHeadlessBackend(target string) (audio.AudioBackend, error) {
+func resolveHeadlessBackend(target string) (audio.AudioBackend, string, error) {
 	if strings.HasPrefix(target, "procedural:") {
-		return proceduralBackend(target)
+		b, err := proceduralBackend(target)
+		if err != nil {
+			return nil, "", err
+		}
+		return b, "", nil
 	}
 	return selectBackendForCatalogTrack(target)
 }
@@ -157,15 +174,16 @@ func proceduralBackend(target string) (audio.AudioBackend, error) {
 }
 
 // selectBackendForCatalogTrack loads the catalog, looks up the
-// track, and runs audio.Select with the mpv factory wired in. The
-// error mapping mirrors the offline / placeholder / float-ref
+// track, resolves the on-disk audio path the backend will hand
+// to Load, and runs audio.Select with the mpv factory wired in.
+// The error mapping mirrors the offline / placeholder / float-ref
 // branches of runSync so the user sees the same wording for the
 // same root cause.
-func selectBackendForCatalogTrack(target string) (audio.AudioBackend, error) {
+func selectBackendForCatalogTrack(target string) (audio.AudioBackend, string, error) {
 	cacheRoot, err := catalogCacheDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lofi play: cannot locate cache dir: %v\n", err)
-		return nil, &commandError{code: 1}
+		return nil, "", &commandError{code: 1}
 	}
 
 	cat, err := catalog.LoadFromDir(cacheRoot)
@@ -175,16 +193,22 @@ func selectBackendForCatalogTrack(target string) (audio.AudioBackend, error) {
 		} else {
 			fmt.Fprintf(os.Stderr, "lofi play: load catalog: %v\n", err)
 		}
-		return nil, &commandError{code: 1}
+		return nil, "", &commandError{code: 1}
 	}
 
 	track := findTrackByID(cat, target)
 	if track == nil {
 		fmt.Fprintf(os.Stderr, "lofi play: unknown track id %q (run `lofi list` to see available ids)\n", target)
-		return nil, &commandError{code: 1}
+		return nil, "", &commandError{code: 1}
 	}
 
-	backend, err := audio.Select(context.Background(), audio.WithMpvFactory(func() (audio.AudioBackend, error) {
+	audioPath := filepath.Join(cacheRoot, target, "audio.mp3")
+	if _, err := os.Stat(audioPath); err != nil {
+		fmt.Fprintf(os.Stderr, "lofi play: audio file missing for track %q (expected %s): %v\n", target, audioPath, err)
+		return nil, "", &commandError{code: 1}
+	}
+
+	backend, err := selectAudioBackend(context.Background(), audio.WithMpvFactory(func() (audio.AudioBackend, error) {
 		return audio.NewMpvBackend()
 	}))
 	if err != nil {
@@ -193,9 +217,9 @@ func selectBackendForCatalogTrack(target string) (audio.AudioBackend, error) {
 		} else {
 			fmt.Fprintf(os.Stderr, "lofi play: select backend: %v\n", err)
 		}
-		return nil, &commandError{code: 1}
+		return nil, "", &commandError{code: 1}
 	}
-	return backend, nil
+	return backend, audioPath, nil
 }
 
 // findTrackByID returns a pointer to the catalog track with the
@@ -215,12 +239,12 @@ func findTrackByID(cat *catalog.Catalog, id string) *catalog.Track {
 }
 
 // playBackend runs the AudioBackend lifecycle: Load with a Track
-// whose ID matches the user request and whose Path is left empty
-// (the adapter resolves the actual bytes per its own rules;
-// mpv.go will read the cache by track id when the audio path is
-// wired in). Play starts the stream; waitForSignal blocks until
-// SIGINT/SIGTERM; Close releases resources.
-func playBackend(backend audio.AudioBackend, trackID string) error {
+// whose ID matches the user request and whose Path is the
+// resolved on-disk audio file (empty for procedural targets,
+// whose backends synthesize samples). Play starts the stream;
+// waitForSignal blocks until SIGINT/SIGTERM; Close releases
+// resources.
+func playBackend(backend audio.AudioBackend, trackID, audioPath string) error {
 	if backend == nil {
 		return &commandError{code: 1}
 	}
@@ -230,7 +254,7 @@ func playBackend(backend audio.AudioBackend, trackID string) error {
 		}
 	}()
 
-	if err := backend.Load(audio.Track{ID: trackID, Path: ""}); err != nil {
+	if err := backend.Load(audio.Track{ID: trackID, Path: audioPath}); err != nil {
 		fmt.Fprintf(os.Stderr, "lofi play: load: %v\n", err)
 		return &commandError{code: 1}
 	}
