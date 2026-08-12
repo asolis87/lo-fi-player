@@ -32,9 +32,30 @@ type fakeMpv struct {
 	done        chan struct{}
 }
 
+// fakeSocketDir returns a private directory whose absolute path is
+// short enough to keep the resulting socket path under macOS's 104-byte
+// sockaddr_un.sun_path limit. On Linux, os.TempDir() is typically /tmp
+// and short enough; on macOS, $TMPDIR (/var/folders/.../T/...) plus a
+// typical test name routinely exceeds the limit and bind(2) fails with
+// "invalid argument", so we anchor under /tmp.
+func fakeSocketDir(t *testing.T) string {
+	t.Helper()
+	const maxBase = 32
+	base := os.TempDir()
+	if len(base) > maxBase {
+		base = "/tmp"
+	}
+	dir, err := os.MkdirTemp(base, "lo-fi-mpv-")
+	if err != nil {
+		t.Fatalf("fake socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func newFakeMpv(t *testing.T) *fakeMpv {
 	t.Helper()
-	dir := t.TempDir()
+	dir := fakeSocketDir(t)
 	sock := filepath.Join(dir, "ipc.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
