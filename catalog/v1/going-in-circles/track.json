@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "going-in-circles",
+  "title": "Going In Circles",
+  "artist": "Lee Rosevere",
+  "license": "CC-BY",
+  "license_status": "VERIFIED",
+  "source_url": "https://archive.org/details/leerosevere_musicforpodcasts_6",
+  "checksum_sha256": "0dd018b2377cd0257c7a82c69e40abdd0663127a265246e998fd5298de8345c7",
+  "attribution_text": "\"Going In Circles\" by Lee Rosevere, licensed CC BY 4.0. Source: https://archive.org/details/leerosevere_musicforpodcasts_6",
+  "duration_seconds": 199,
+  "audio_filename": "audio.mp3"
+}

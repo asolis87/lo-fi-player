@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "it-was-like-that-when-i-got-here",
+  "title": "It Was Like That When I Got Here",
+  "artist": "Lee Rosevere",
+  "license": "CC-BY",
+  "license_status": "VERIFIED",
+  "source_url": "https://archive.org/details/leerosevere_musicforpodcasts_6",
+  "checksum_sha256": "3295f45f7d07d995a97b805922a101d598bf3ab87e1a8cb4641a86ec695c6afd",
+  "attribution_text": "\"It Was Like That When I Got Here\" by Lee Rosevere, licensed CC BY 4.0. Source: https://archive.org/details/leerosevere_musicforpodcasts_6",
+  "duration_seconds": 178,
+  "audio_filename": "audio.mp3"
+}
