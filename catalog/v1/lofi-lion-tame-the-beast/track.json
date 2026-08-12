@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "lofi-lion-tame-the-beast",
+  "title": "Tame The Beast",
+  "artist": "LOFI LION",
+  "license": "CC-BY",
+  "license_status": "VERIFIED",
+  "source_url": "https://archive.org/details/lofi-lion-tame-the-beast",
+  "checksum_sha256": "401f26d7a229a865291d4f9858deeb2ea29b02331703b74315b209752655395b",
+  "attribution_text": "\"Tame the Beast\" by LOFI LION, licensed CC BY 4.0. Source: https://archive.org/details/lofi-lion-tame-the-beast",
+  "duration_seconds": 174,
+  "audio_filename": "audio.mp3"
+}
