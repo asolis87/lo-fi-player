@@ -35,9 +35,24 @@ type Config struct {
 	LastQueue      []string
 	LastTrackIndex int
 	Volume         int
+	// History es el MRU de IDs reproducidos (newest-first, cap 25);
+	// lo consume PlaybackState (VOL-1 + HIST-1 + HIST-2) y solo se
+	// emite en el esquema v2 (SCHEMA-1). En una Config construida
+	// a partir de legacy v1/versionless, History queda vacio y se
+	// pobla via migrateLegacyToV2.
+	History []string
 }
 
-func Default() Config { return Config{Volume: 80} }
+// Default devuelve un Config con volumen inicial 50 (VOL-1) e
+// historial vacio; el caller debe poblar History via
+// migrateLegacyToV2 cuando cargue desde legacy v1/versionless.
+func Default() Config { return Config{Volume: DefaultVolume} }
+
+// renameFile es el seam de renaming atomico inyectable (PERSIST-2):
+// permite que las pruebas fuercen una falla controlada antes del
+// rename para demostrar que el staging se limpia y el archivo
+// previo queda intacto. Por defecto usa os.Rename.
+var renameFile = os.Rename
 
 func Dir() (string, error) {
 	base := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
@@ -123,7 +138,7 @@ func Save(cfg *Config) error {
 	if err := stage.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(stagePath, target); err != nil {
+	if err := renameFile(stagePath, target); err != nil {
 		return err
 	}
 	renamed = true
