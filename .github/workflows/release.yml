@@ -52,8 +52,8 @@ jobs:
             -o lofi \
             ./cmd/lofi
 
-      - name: Verify no placeholder SHA in binary
-        run: ./scripts/verify-release.sh ./lofi
+      - name: Verify baked SHA matches manifest commit
+        run: ./scripts/verify-release.sh ./lofi "${{ steps.manifest-sha.outputs.manifest-sha }}"
 
       - name: Upload binary to GitHub Release
         uses: softprops/action-gh-release@v2

@@ -1,48 +1,55 @@
 #!/usr/bin/env bash
-# verify-release.sh — PR-E release-pipeline gate (task 4.3).
+# verify-release.sh — PR-E release-pipeline gate (slice #2).
 #
-# Runs `strings <binary> | grep` for the catalog seed placeholder
-# and exits non-zero if any match survives. The release workflow
-# (release.yml) calls this step right after the build so a binary
-# uploaded without `-ldflags -X` is caught before it reaches a
-# GitHub Release.
+# Runs `go run ./cmd/lofi verify-release-binary <bin> <sha>` so
+# the bash path and the Go unit tests share one implementation
+# of the SHA check. The previous slice (#4.3) implemented the
+# gate as `strings <bin> | grep <PLACEHOLDER_SHA>`, which is
+# structurally broken: Go's linker keeps the source-code literal
+# in rodata adjacent to the runtime value of FirstRunCommitSHA,
+# so the substring search flags every correctly baked binary as
+# failed. The new gate reads the runtime value of the symbol via
+# debug/{macho,elf,pe} and compares it against the expected SHA.
 #
-# Implementation note: pipefail is intentionally NOT set. macOS
-# `strings` keeps writing after `grep -q` exits on a match, which
-# raises SIGPIPE (exit 141) inside `strings`. With pipefail that
-# 141 would mask the actual match result; without pipefail the
-# `if` only sees grep's exit code (0 on hit, 1 on miss). The
-# `set -eu` pair is kept so unset variables and individual
-# command failures still abort the script before the gate runs.
-#
-# Usage: ./scripts/verify-release.sh <path-to-binary>
+# Usage: ./scripts/verify-release.sh <path-to-binary> <expected-SHA>
 # Exit codes:
-#   0  binary is safe to ship (no placeholder hit)
-#   1  binary contains <PLACEHOLDER_SHA>; release blocked
-#   2  invocation error (missing arg, file unreadable)
+#   0  binary is safe to ship (runtime SHA == expected SHA)
+#   1  binary carries the placeholder literal, has the wrong
+#      runtime SHA, or cannot be read
+#   2  invocation error (missing args, file unreadable,
+#      `go run` failed to start)
+#
+# Dependencies: a working `go` toolchain in $PATH.
 
 set -eu
 
-if [[ $# -ne 1 ]]; then
-	echo "usage: $0 <path-to-binary>" >&2
+if [[ $# -ne 2 ]]; then
+	echo "usage: $0 <path-to-binary> <expected-SHA>" >&2
 	exit 2
 fi
 
 binary="$1"
+expected_sha="$2"
 
 if [[ ! -f "$binary" ]]; then
 	echo "RELEASE BLOCKED: $binary is not a regular file" >&2
 	exit 2
 fi
 
-placeholder="<PLACEHOLDER_SHA>"
+# Hand off to the Go subcommand. `go run ./cmd/lofi ...` exits
+# non-zero on any verification failure, and the subcommand
+# already formats a human-readable error to stderr so we do not
+# need to add anything here. Forwarding the exit code is what
+# makes this script usable from a CI step.
+set +e
+go run ./cmd/lofi verify-release-binary "$binary" "$expected_sha"
+status=$?
+set -e
 
-# grep without -q: -q exits early on the first match, which can
-# leave `strings` writing into a closed pipe (SIGPIPE) and
-# confuse shell pipelines. Using a plain grep avoids that race.
-if strings "$binary" | grep -F "$placeholder" > /dev/null; then
-	echo "RELEASE BLOCKED: $placeholder found in binary ($binary)" >&2
-	exit 1
+if [[ "$status" -eq 0 ]]; then
+	echo "RELEASE OK: $expected_sha baked in $binary"
+	exit 0
 fi
 
-echo "RELEASE OK: no placeholder SHA in $binary"
+echo "RELEASE BLOCKED: $binary failed the SHA gate (exit $status)" >&2
+exit "$status"
