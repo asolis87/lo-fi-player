@@ -74,8 +74,9 @@ func Path() (string, error) {
 	return filepath.Join(d, fileName), nil
 }
 
-// Load reads the config. Missing file returns Default() (first run).
-// Malformed file returns ErrCorrupt so LoadOrDefault can quarantine it.
+// Load lee el config. Ausente => Default(). Strict version router (SCHEMA-1):
+// schema_version=2 -> parseV2; ausente -> legacy parse; v3+/unknown-key/malformed
+// => ErrCorrupt (LoadOrDefault quarantine a .bak).
 func Load() (*Config, error) {
 	p, err := Path()
 	if err != nil {
@@ -88,6 +89,29 @@ func Load() (*Config, error) {
 			return &d, nil
 		}
 		return nil, fmt.Errorf("config: read %s: %w", p, err)
+	}
+	// Sniff de schema_version: primera linea con "<key> = <int>".
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 || strings.TrimSpace(line[:eq]) != schemaVersionKey {
+			continue
+		}
+		var vN int
+		if json.Unmarshal([]byte(strings.TrimSpace(line[eq+1:])), &vN) != nil {
+			break
+		}
+		if vN != 2 {
+			return nil, fmt.Errorf("%w: schema_version %d unsupported (only v2)", ErrCorrupt, vN)
+		}
+		h, vol, verr := parseV2(data)
+		if verr != nil {
+			return nil, fmt.Errorf("%w: %s", ErrCorrupt, verr.Error())
+		}
+		return &Config{Volume: vol, History: h}, nil
 	}
 	cfg, perr := parse(data)
 	if perr != nil {
@@ -129,8 +153,15 @@ func Save(cfg *Config) error {
 	if err := os.Chmod(stagePath, filePerm); err != nil {
 		return err
 	}
-	if err := writeTOML(stage, cfg); err != nil {
-		return err
+	// History presente => v2 estricto; ausente => v1/versionless (SCHEMA-1 + HIST-3).
+	var werr error
+	if cfg.History != nil {
+		werr = writeV2(stage, cfg.History, cfg.Volume)
+	} else {
+		werr = writeTOML(stage, cfg)
+	}
+	if werr != nil {
+		return werr
 	}
 	if err := stage.Sync(); err != nil {
 		return err

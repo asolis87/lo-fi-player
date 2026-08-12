@@ -95,25 +95,25 @@ func runInteractiveResume() error {
 	return nil
 }
 
-// decideResumeState encapsula RESUME-1/2: prior state + TTY ->
-// prompt; prior state + non-TTY -> auto-hydrate; sin prior state
-// -> nil. La declinacion conserva el volumen efectivo y vacia la
-// historia (RESUME-1 s2).
-func decideResumeState(state *config.PlaybackState, _ *catalog.Catalog) (*config.PlaybackState, error) {
-	if state == nil || len(state.History()) == 0 {
+// decideResumeState: RESUME-1/2 + FILTER-1/2. Filtra historia (FILTER-1);
+// declinacion conserva volumen y vacia historia (RESUME-1 s2); volume-only
+// hidrata sin prompt (PERSIST-1).
+func decideResumeState(state *config.PlaybackState, cat *catalog.Catalog) (*config.PlaybackState, error) {
+	if state == nil {
 		return nil, nil
 	}
-	if !stdinIsTTY() {
-		return state, nil
+	resume := true
+	if stdinIsTTY() {
+		var err error
+		resume, err = resumePrompter(os.Stdout, resumeReader)
+		if err != nil {
+			return nil, err
+		}
 	}
-	resume, err := resumePrompter(os.Stdout, resumeReader)
-	if err != nil {
-		return nil, err
-	}
+	hydrated := config.Default()
+	hydrated.Volume = state.EffectiveVolume()
 	if resume {
-		return state, nil
+		hydrated.History = filterHistoryAgainstCatalog(state.History(), cat)
 	}
-	cleared := config.Default()
-	cleared.Volume = state.EffectiveVolume()
-	return config.NewPlaybackState(cleared), nil
+	return config.NewPlaybackState(hydrated), nil
 }

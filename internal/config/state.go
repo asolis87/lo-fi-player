@@ -35,24 +35,33 @@ func NewPlaybackState(raw Config) *PlaybackState {
 	return &PlaybackState{raw: raw}
 }
 
-// LoadPlaybackState lee el config persistido y devuelve un
-// PlaybackState hidratado. Archivo ausente o corrupto = nil
-// ("sin estado previo"). LastQueue legacy se migra a History
-// via migrateLegacyToV2 sin persistir (B5 dueña del write-back).
-// History+LastQueue vacios devuelven nil porque no hay estado
-// que reanudar.
+// LoadPlaybackState: volume-only = estado previo (PERSIST-1); legacy migra+emite
+// v2 (HIST-3); write-back fallido restaura bytes.
 func LoadPlaybackState() *PlaybackState {
+	p, err := Path()
+	if err != nil {
+		return nil
+	}
+	rawBytes, rerr := os.ReadFile(p)
+	if rerr != nil {
+		// Ausente o no legible => no hay estado previo.
+		return nil
+	}
 	cfg, err := Load()
 	if err != nil || cfg == nil {
 		return nil
 	}
-	if len(cfg.History) == 0 && len(cfg.LastQueue) > 0 {
-		cfg.History = migrateLegacyToV2(cfg.LastQueue)
+	state := NewPlaybackState(*cfg)
+	if state.raw.History != nil {
+		return state
 	}
-	if len(cfg.History) == 0 {
-		return nil
+	// Legacy: migrar + persistir v2 (HIST-3); write-back fallido restaura bytes y deja estado en memoria.
+	state.raw.History = migrateLegacyToV2(state.raw.LastQueue)
+	if perr := state.Persist(); perr != nil {
+		fmt.Fprintf(os.Stderr, "config: persist v2 migration: %v\n", perr)
+		_ = os.WriteFile(p, rawBytes, filePerm)
 	}
-	return NewPlaybackState(*cfg)
+	return state
 }
 
 // EffectiveVolume devuelve el volumen crudo si esta dentro del
