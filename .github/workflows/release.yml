@@ -1,0 +1,62 @@
+name: release
+
+# PR-E (slice #2): tag-triggered release pipeline that bakes the
+# SHA of catalog/v1/manifest.json at HEAD into
+# internal/catalog.FirstRunCommitSHA via `-ldflags -X`, runs the
+# scripts/verify-release.sh gate against the resulting binary, and
+# attaches the binary to the GitHub Release for the pushed tag.
+#
+# This file mirrors .github/workflows/ci.yml in shape (Go 1.22,
+# ubuntu-latest, actions/checkout@v4, actions/setup-go@v5) so a
+# developer reading either file recognises the conventions.
+# `fail_on_unmatched_files: true` on the upload step is the
+# threat-matrix RED test for slice #2: a release with no artifact
+# fails the action loudly instead of silently producing an empty
+# release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build & upload release binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: resolve manifest SHA
+        id: manifest-sha
+        run: |
+          MANIFEST_SHA=$(git rev-parse HEAD:catalog/v1/manifest.json)
+          echo "manifest-sha=$MANIFEST_SHA" >> "$GITHUB_OUTPUT"
+          echo "baking SHA $MANIFEST_SHA into FirstRunCommitSHA"
+
+      - name: build lofi binary with baked SHA
+        run: |
+          go build \
+            -ldflags "-X github.com/asolis87/lo-fi-player/internal/catalog.FirstRunCommitSHA=${{ steps.manifest-sha.outputs.manifest-sha }}" \
+            -o lofi \
+            ./cmd/lofi
+
+      - name: Verify no placeholder SHA in binary
+        run: ./scripts/verify-release.sh ./lofi
+
+      - name: Upload binary to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: lofi
+          fail_on_unmatched_files: true
