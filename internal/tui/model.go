@@ -67,6 +67,10 @@ const volumeStep = 5
 // AudioMode etiqueta el backend activo para la guia visible (FBK-1) y
 // ResolvePath traduce un id de catalogo a su ruta en disco: la
 // composicion lo inyecta para que la TUI no conozca el layout de cache.
+// RebindBackend es el seam que la composicion inyecta para que la TUI
+// pueda solicitar el swap a procedural:rain cuando el backend reporta
+// un error sticky irrecuperable (EVT-2 / S-EVT-2-sticky). nil inhibe
+// el swap; la TUI conserva banner y backend en su lugar.
 type Model struct {
 	Backend          audio.AudioBackend
 	Catalog          *catalog.Catalog
@@ -83,6 +87,7 @@ type Model struct {
 	NextGeneration   uint64
 	AudioMode        string
 	ResolvePath      func(trackID string) string
+	RebindBackend    func() (audio.AudioBackend, string, error)
 }
 
 // hasTracks reporta si el catalogo puede sostener Load/Play (NAV-2).
@@ -132,16 +137,21 @@ func NewModelWithState(backend audio.AudioBackend, cat *catalog.Catalog, state *
 	}
 }
 
-// Init returns a no-op initial command. The TUI has no startup
-// I/O beyond what the composition root has already wired (the
-// backend subprocess and the optional first-run fetch). Future
-// work units can return tea.Tick or a listen-on-ErrCh command here.
-func (m Model) Init() tea.Cmd { return nil }
+// Init suscribe el primer Cmd de escucha sobre el canal Events() del
+// backend si este implementa audio.EventSource. Init corre una sola
+// vez al arrancar el programa; Update mantiene la cadena viva
+// re-suscribiendose tras cada audio.Event procesado.
+func (m Model) Init() tea.Cmd {
+	return m.waitForAudioEventCmd()
+}
 
 // Update is the Bubble Tea Update protocol entry point. It dispatches
 // keys to the keymap and accepts audio.Event values to surface a
-// non-fatal banner via LastError (S-TUI-2). Unknown messages are
-// silently ignored to keep the TUI deterministic.
+// non-fatal banner via LastError (S-TUI-2) y para auto-avanzar el
+// catalogo cuando llega EventEnd valido (EVT-1). Tras procesar un
+// audio.Event re-suscribe el Cmd para mantener la cadena viva; los
+// mensajes no-audio no devuelven Cmd, conservando el suscriptor
+// previo hasta el proximo audio.Event.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -151,16 +161,79 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.applyAction(action)
 	case audio.Event:
-		if msg.Type == audio.EventError {
-			m.LastError = msg.Message
+		// Canal cerrado (swap/Close) produce Event{} con Type=="":
+		// re-suscribimos sin tocar estado.
+		if msg.Type == "" {
+			return m, m.waitForAudioEventCmd()
 		}
-		return m, nil
+		return m.applyAudioEvent(msg), m.waitForAudioEventCmd()
 	case tea.WindowSizeMsg:
 		// No responsive layout in slice #1; keep the rendered text
 		// static so the QUIT/keypress contract stays deterministic.
 		return m, nil
 	}
 	return m, nil
+}
+
+// applyAudioEvent dispatch un audio.Event a su handler:
+//   - EventEnd con generacion vigente: auto-avanza circularmente y
+//     reproduce la siguiente pista via loadAndPlaySelected(1). Sin
+//     catalogo o sin generacion vigente: ignora el evento.
+//   - EventEnd con generacion obsoleta (mismatch con
+//     LoadedGeneration): se ignora sin navegar, Load, Play ni
+//     persistencia. Asi un end atrasado del backend no produce
+//     saltos espurios.
+//   - EventError: persiste el banner via LastError y, si RebindBackend
+//     esta cableado, pide el swap a procedural:rain. Tras swap
+//     exitoso resetea LoadedID/PlayingID/LoadedGeneration/NextGeneration
+//     para que la siguiente carga asigne una generacion nueva; el
+//     backend viejo queda cerrado por la composicion. Si RebindBackend
+//     falla o no esta inyectado, conserva banner y backend vigentes.
+func (m Model) applyAudioEvent(ev audio.Event) Model {
+	switch ev.Type {
+	case audio.EventEnd:
+		if ev.Generation != m.LoadedGeneration {
+			return m
+		}
+		if !m.hasTracks() {
+			return m
+		}
+		return m.loadAndPlaySelected(1)
+	case audio.EventError:
+		m.LastError = ev.Message
+		if m.RebindBackend == nil {
+			return m
+		}
+		newBackend, newMode, err := m.RebindBackend()
+		if err != nil || newBackend == nil {
+			return m
+		}
+		m.Backend = newBackend
+		m.AudioMode = newMode
+		m.LoadedID = ""
+		m.PlayingID = ""
+		m.LoadedGeneration = 0
+		m.NextGeneration = 0
+		return m
+	}
+	return m
+}
+
+// waitForAudioEventCmd devuelve un tea.Cmd que lee UN evento del
+// canal Events() del backend actual y lo entrega como Msg. Si el
+// backend no implementa audio.EventSource retorna nil. Un canal
+// cerrado (swap/Close) rinde audio.Event{} con Type=="" y Update lo
+// ignora para re-suscribirse de inmediato.
+func (m Model) waitForAudioEventCmd() tea.Cmd {
+	src, ok := m.Backend.(audio.EventSource)
+	if !ok {
+		return nil
+	}
+	ch := src.Events()
+	return func() tea.Msg {
+		ev, _ := <-ch
+		return ev
+	}
 }
 
 // View delegates to the per-mode renderer. A non-fatal error banner
