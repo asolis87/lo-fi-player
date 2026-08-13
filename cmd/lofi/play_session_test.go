@@ -261,3 +261,52 @@ func TestRunInteractiveResume_ReportsModeToTUI(t *testing.T) {
 		t.Fatalf("TUI Model.AudioMode = %q, want %q", launcher.model.AudioMode, "procedural:rain")
 	}
 }
+
+// withNewRainBackendStub swaps el seam newRainBackend que SwapToRain
+// usa para construir la lluvia procedural.
+func withNewRainBackendStub(t *testing.T, fn func() (audio.AudioBackend, error)) {
+	t.Helper()
+	orig := newRainBackend
+	newRainBackend = fn
+	t.Cleanup(func() { newRainBackend = orig })
+}
+
+// TestInteractiveSession_SwapToRainClosesOldAndReturnsNew cubre la
+// pieza de composicion de EVT-2: SwapToRain cierra el backend
+// vigente, instala procedural:rain via el seam newRainBackend y
+// devuelve el nuevo backend. Tras el swap, Close() cierra SOLO el
+// backend vigente (rain), no el viejo. El segundo Close sigue
+// siendo idempotente via sync.Once.
+func TestInteractiveSession_SwapToRainClosesOldAndReturnsNew(t *testing.T) {
+	old, rain := audio.NewMockBackend(), audio.NewMockBackend()
+	session := newInteractiveAudioSession(old)
+	withNewRainBackendStub(t, func() (audio.AudioBackend, error) { return rain, nil })
+
+	gotBackend, gotMode, err := session.SwapToRain()
+	if err != nil || gotBackend != audio.AudioBackend(rain) || gotMode != "procedural:rain" {
+		t.Fatalf("SwapToRain = (%v, %q, %v), want (%p, procedural:rain, nil)", gotBackend, gotMode, err, rain)
+	}
+	if !old.Closed() || session.Mode() != "procedural:rain" || session.Backend() != audio.AudioBackend(rain) {
+		t.Fatalf("estado tras swap: oldClosed=%v mode=%q backend=%v", old.Closed(), session.Mode(), session.Backend())
+	}
+	if err := session.Close(); err != nil || !rain.Closed() {
+		t.Fatalf("Close() tras swap: err=%v rainClosed=%v", err, rain.Closed())
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("segundo Close no es idempotente: %v", err)
+	}
+}
+
+// TestRunInteractiveResume_WiresRebindBackend cubre el cableado:
+// runPlay(nil) inyecta RebindBackend en el Model de la TUI para que
+// el EventError path pueda invocar SwapToRain.
+func TestRunInteractiveResume_WiresRebindBackend(t *testing.T) {
+	stub := &stubLauncher{err: nil}
+	withStubLauncher(t, stub)
+	withInteractiveMpvProbeStub(t, func() (string, bool) { return "/usr/bin/mpv", true })
+	withMpvBackendFactoryStub(t, func() (audio.AudioBackend, error) { return audio.NewMockBackend(), nil })
+	stubResumeContext(t)
+	if _, _ = captureStderr(t, func() int { return codeFor(runPlay(nil)) }); !stub.called || stub.model.RebindBackend == nil {
+		t.Fatalf("called=%v RebindBackend nil=%v; composition debe inyectar SwapToRain", stub.called, stub.model.RebindBackend == nil)
+	}
+}

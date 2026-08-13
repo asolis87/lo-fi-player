@@ -93,11 +93,29 @@ var resumePrompter = func(w io.Writer, r io.Reader) (bool, error) {
 	return false, nil
 }
 
+// newRainBackend es el seam que SwapToRain usa para construir la
+// lluvia procedural. Produccion: ProceduralBackend + RainGenerator.
+// Tests inyectan un stub que devuelve un MockBackend determinista.
+var newRainBackend = func() (audio.AudioBackend, error) {
+	b := audio.NewProceduralBackend(
+		audio.WithGenerator(audio.NewRainGenerator(44100)),
+		audio.WithSampleRate(44100),
+	)
+	if b == nil {
+		return nil, fmt.Errorf("lofi play: procedural rain backend unavailable")
+	}
+	return b, nil
+}
+
 // interactiveAudioSession owns the AudioBackend that the
 // interactive TUI plays through, plus the mode label the TUI
 // displays. Close uses sync.Once so the launcher-failure path
 // and the normal-return path both call backend.Close() exactly
-// once even though they share the same cleanup code.
+// once even though they share the same cleanup code. SwapToRain
+// reemplaza el backend vigente por procedural:rain en respuesta a
+// un EventError irrecuperable (EVT-2 / S-EVT-2-sticky); el backend
+// viejo se cierra tras el swap para que Close() final solo afecte
+// al backend vigente.
 type interactiveAudioSession struct {
 	backend audio.AudioBackend
 	mode    string
@@ -122,16 +140,45 @@ func (s *interactiveAudioSession) Mode() string { return s.mode }
 // return the original error and do not double-close. Non-nil
 // errors that are not ErrBackendUnavailable are surfaced to
 // stderr so the user sees them, mirroring the headless
-// playBackend defer contract.
+// playBackend defer contract. Un swap previo (SwapToRain) puede
+// haber dejado el puntero en nil momentaneamente; en ese caso
+// Close no intenta cerrar dos veces.
 func (s *interactiveAudioSession) Close() error {
 	s.once.Do(func() {
-		err := s.backend.Close()
+		b := s.backend
+		s.backend = nil
+		if b == nil {
+			return
+		}
+		err := b.Close()
 		if err != nil && !errors.Is(err, audio.ErrBackendUnavailable) {
 			fmt.Fprintf(os.Stderr, "lofi play: close backend: %v\n", err)
 		}
 		s.err = err
 	})
 	return s.err
+}
+
+// SwapToRain cierra el backend vigente y lo reemplaza por
+// procedural:rain. El backend viejo se cierra tras instalar el
+// nuevo, asi Close() final solo afecta al backend vigente. La
+// composicion entrega el resultado a la TUI via RebindBackend;
+// errores no fatales de Close del backend viejo se registran a
+// stderr y el swap continua.
+func (s *interactiveAudioSession) SwapToRain() (audio.AudioBackend, string, error) {
+	rain, err := newRainBackend()
+	if err != nil {
+		return nil, "", err
+	}
+	old := s.backend
+	s.backend = rain
+	s.mode = "procedural:rain"
+	if old != nil {
+		if cerr := old.Close(); cerr != nil && !errors.Is(cerr, audio.ErrBackendUnavailable) {
+			fmt.Fprintf(os.Stderr, "lofi play: close backend before rain fallback: %v\n", cerr)
+		}
+	}
+	return rain, s.mode, nil
 }
 
 // openInteractiveSession asks the package-level selector for an
@@ -212,6 +259,7 @@ func runInteractiveResume() error {
 	m := tui.NewModelWithState(session.Backend(), cat, hydrated, nil)
 	m.AudioMode = session.Mode()
 	m.ResolvePath = func(id string) string { return interactiveTrackPath(cat, id) }
+	m.RebindBackend = func() (audio.AudioBackend, string, error) { return session.SwapToRain() }
 	if err := launchTUI(m); err != nil {
 		fmt.Fprintf(os.Stderr, "lofi play: tui: %v\n", err)
 		return &commandError{code: 1}
