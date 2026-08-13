@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
 
 	"github.com/asolis87/lo-fi-player/internal/audio"
 	"github.com/asolis87/lo-fi-player/internal/catalog"
@@ -50,6 +54,21 @@ var stdinIsTTY = func() bool {
 // resumeReader es el io.Reader del que resumePrompter lee.
 var resumeReader io.Reader = os.Stdin
 
+// interactiveMpvProbe is the package-level seam the interactive
+// selector passes to audio.Select via WithMpvProbe. Production
+// uses exec.LookPath on "mpv"; tests swap it to a deterministic
+// function so the real audio.Select code path runs with a known
+// mpv-found outcome and the factory seam can be exercised
+// causally (probe=true → factory invoked; probe=false →
+// procedural fallback attempted).
+var interactiveMpvProbe = func() (string, bool) {
+	p, err := exec.LookPath("mpv")
+	if err != nil {
+		return "", false
+	}
+	return p, true
+}
+
 // resumePrompter escribe el prompt y lee un byte. y/Y -> resume;
 // n/N/EOF -> decline. Errores distintos de EOF se propagan.
 var resumePrompter = func(w io.Writer, r io.Reader) (bool, error) {
@@ -74,6 +93,105 @@ var resumePrompter = func(w io.Writer, r io.Reader) (bool, error) {
 	return false, nil
 }
 
+// interactiveAudioSession owns the AudioBackend that the
+// interactive TUI plays through, plus the mode label the TUI
+// displays. Close uses sync.Once so the launcher-failure path
+// and the normal-return path both call backend.Close() exactly
+// once even though they share the same cleanup code.
+type interactiveAudioSession struct {
+	backend audio.AudioBackend
+	mode    string
+	once    sync.Once
+	err     error
+}
+
+// newInteractiveAudioSession wraps a freshly-selected backend
+// with the mode label derived from its concrete type.
+func newInteractiveAudioSession(b audio.AudioBackend) *interactiveAudioSession {
+	return &interactiveAudioSession{backend: b, mode: audioModeFor(b)}
+}
+
+// Backend returns the AudioBackend the TUI plays through.
+func (s *interactiveAudioSession) Backend() audio.AudioBackend { return s.backend }
+
+// Mode returns the user-facing audio mode label for the active
+// backend. Empty string means "unknown" (TUI renders that).
+func (s *interactiveAudioSession) Mode() string { return s.mode }
+
+// Close releases the backend exactly once. Subsequent calls
+// return the original error and do not double-close. Non-nil
+// errors that are not ErrBackendUnavailable are surfaced to
+// stderr so the user sees them, mirroring the headless
+// playBackend defer contract.
+func (s *interactiveAudioSession) Close() error {
+	s.once.Do(func() {
+		err := s.backend.Close()
+		if err != nil && !errors.Is(err, audio.ErrBackendUnavailable) {
+			fmt.Fprintf(os.Stderr, "lofi play: close backend: %v\n", err)
+		}
+		s.err = err
+	})
+	return s.err
+}
+
+// openInteractiveSession asks the package-level selector for an
+// AudioBackend (production wiring: audio.Select with the
+// interactiveMpvProbe + mpvBackendFactory seams). The session
+// owns the backend for its lifetime. Errors propagate to the
+// caller so it can render actionable stderr without invoking
+// the TUI launcher.
+func openInteractiveSession(ctx context.Context) (*interactiveAudioSession, error) {
+	backend, err := selectAudioBackend(ctx,
+		audio.WithMpvProbe(interactiveMpvProbe),
+		audio.WithMpvFactory(mpvBackendFactory),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return newInteractiveAudioSession(backend), nil
+}
+
+// reportNoInteractiveBackend formats the actionable stderr
+// message the user sees when no audio backend can be acquired.
+// Always returns &commandError{code: 1}.
+func reportNoInteractiveBackend(_ error) error {
+	fmt.Fprintln(os.Stderr, "lofi play: no audio backend available; install mpv for full audio or use `procedural:rain` for ambient noise")
+	return &commandError{code: 1}
+}
+
+// audioModeFor returns the user-facing label for the concrete
+// backend the selector returned. Concrete adapter types stay in
+// the audio package; the TUI receives only the string.
+func audioModeFor(b audio.AudioBackend) string {
+	switch b.(type) {
+	case *audio.MpvBackend:
+		return "mpv"
+	case *audio.ProceduralBackend:
+		return "procedural:rain"
+	}
+	return ""
+}
+
+// interactiveTrackPath returns the on-disk audio path for a
+// catalog track id. Empty string for unknown ids so the TUI can
+// surface a "no audio file" hint via LastError without leaking
+// cache layout into internal/tui.
+func interactiveTrackPath(cat *catalog.Catalog, id string) string {
+	if cat == nil || id == "" {
+		return ""
+	}
+	for i := range cat.Tracks {
+		if cat.Tracks[i].ID == id {
+			root, err := catalogCacheDir()
+			if err != nil {
+				return ""
+			}
+			return filepath.Join(root, id, "audio.mp3")
+		}
+	}
+	return ""
+}
+
 // runInteractiveResume es la rama sin argumentos de `lofi play`:
 // RESUME-1 TTY prompt, RESUME-2 non-TTY auto-hydrate, o silencio
 // si no hay estado previo. La rama headless (`<id>`) sigue en
@@ -86,8 +204,14 @@ func runInteractiveResume() error {
 		fmt.Fprintf(os.Stderr, "lofi play: resume: %v\n", err)
 		return &commandError{code: 1}
 	}
-	backend := audio.NewMockBackend()
-	m := tui.NewModelWithState(backend, cat, hydrated, nil)
+	session, err := openInteractiveSession(context.Background())
+	if err != nil {
+		return reportNoInteractiveBackend(err)
+	}
+	defer func() { _ = session.Close() }()
+	m := tui.NewModelWithState(session.Backend(), cat, hydrated, nil)
+	m.AudioMode = session.Mode()
+	m.ResolvePath = func(id string) string { return interactiveTrackPath(cat, id) }
 	if err := launchTUI(m); err != nil {
 		fmt.Fprintf(os.Stderr, "lofi play: tui: %v\n", err)
 		return &commandError{code: 1}
