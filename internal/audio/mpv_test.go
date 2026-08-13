@@ -30,6 +30,42 @@ type fakeMpv struct {
 	handlerDone chan struct{}
 	cmds        []ipcRequest
 	done        chan struct{}
+
+	// onLoad, when non-nil, is invoked after the fake sends the
+	// success reply to a "loadfile" command. It is the seam used
+	// by TestMpvGenCorrelation to inject start-file / end-file
+	// events that exercise the generation correlation path. The
+	// default (nil) keeps the pre-PR-1B behavior: the fake only
+	// replies to commands and never emits async events, so the
+	// existing tests (which never read b.Events() during a Load)
+	// keep passing.
+	onLoad func(conn net.Conn, req ipcRequest)
+
+	// entryCounter allocates monotonically increasing playlist
+	// entry IDs for the events injected via onLoad. Tests that
+	// need a specific ID (e.g. a never-seen "unknown" entry) can
+	// set it directly under f.mu.
+	entryCounter int
+}
+
+// nextEntryID allocates a fresh, never-reused playlist entry id.
+// Used by the onLoad callbacks to keep start-file and end-file
+// correlated in the backend's entryGen map.
+func (f *fakeMpv) nextEntryID() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.entryCounter++
+	return f.entryCounter
+}
+
+// sendAsync writes one mpv event frame (start-file, end-file, etc.)
+// on the connection. The event field is set; data is JSON-encoded
+// and sent as the reply's data field. The mpv client treats each
+// newline-delimited frame as one event.
+func (f *fakeMpv) sendAsync(conn net.Conn, event string, data any) {
+	payload, _ := json.Marshal(data)
+	msg, _ := json.Marshal(ipcReply{Event: event, Data: payload})
+	_, _ = conn.Write(append(msg, '\n'))
 }
 
 // fakeSocketDir returns a private directory whose absolute path is
@@ -106,6 +142,13 @@ func (f *fakeMpv) handle(conn net.Conn) {
 		reply, _ := json.Marshal(ipcReply{Error: "success", RequestID: req.RequestID})
 		if _, err := conn.Write(append(reply, '\n')); err != nil {
 			return
+		}
+		// PR-1B seam: after acknowledging a loadfile, optionally
+		// inject async start-file / end-file frames so the backend
+		// can be tested under realistic playlist correlation.
+		// Existing tests leave onLoad nil and see no async events.
+		if len(req.Command) >= 1 && req.Command[0] == "loadfile" && f.onLoad != nil {
+			f.onLoad(conn, req)
 		}
 	}
 }
@@ -396,6 +439,166 @@ func TestMpvBackend_SocketTeardown_RemovesFile(t *testing.T) {
 	if err := b.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
+}
+
+// TestMpvGenCorrelation: correlation, FIFO, Close safety, recovery.
+func TestMpvGenCorrelation(t *testing.T) {
+
+	startEnd := func(fake *fakeMpv) {
+		fake.onLoad = func(conn net.Conn, _ ipcRequest) {
+			id := fake.nextEntryID()
+			fake.sendAsync(conn, "start-file", map[string]any{"playlist_entry_id": id})
+			fake.sendAsync(conn, "end-file", map[string]any{"playlist_entry_id": id, "reason": "eof"})
+		}
+	}
+
+	t.Run("CorrelatedLoadEmitsEventEnd", func(t *testing.T) {
+		fake := newFakeMpv(t)
+		startEnd(fake)
+		b := newBackendForFake(t, fake)
+
+		if err := b.Load(Track{ID: "t1", Path: "/tmp/t1.mp3", Generation: 1}); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		endEv := mustEvent(t, b, time.Second)
+		if endEv.Type != EventEnd || endEv.Generation != 1 || endEv.Message != "eof" {
+			t.Fatalf("event = %+v, want EventEnd{Generation:1, Message:eof}", endEv)
+		}
+	})
+
+	t.Run("UnknownEntryIDIgnored", func(t *testing.T) {
+		fake := newFakeMpv(t)
+		fake.onLoad = func(conn net.Conn, _ ipcRequest) {
+			fake.sendAsync(conn, "end-file", map[string]any{"playlist_entry_id": 999, "reason": "eof"})
+		}
+		b := newBackendForFake(t, fake)
+		if err := b.Load(Track{ID: "t1", Path: "/tmp/t1.mp3", Generation: 1}); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		select {
+		case ev := <-b.Events():
+			t.Fatalf("unexpected event from unknown entry_id: %+v", ev)
+		case <-time.After(200 * time.Millisecond):
+		}
+	})
+
+	t.Run("GenerationZeroHeadless", func(t *testing.T) {
+		fake := newFakeMpv(t)
+		startEnd(fake)
+		b := newBackendForFake(t, fake)
+		if err := b.Load(Track{ID: "h", Path: "procedural:rain", Generation: 0}); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		endEv := mustEvent(t, b, time.Second)
+		if endEv.Type != EventEnd || endEv.Generation != 0 {
+			t.Fatalf("event = %+v, want EventEnd{Generation:0}", endEv)
+		}
+	})
+
+	t.Run("BurstFIFOLossless", func(t *testing.T) {
+		const burst = 80
+		fake := newFakeMpv(t)
+		fake.onLoad = func(conn net.Conn, _ ipcRequest) {
+			for i := 0; i < burst; i++ {
+				id := fake.nextEntryID()
+				fake.sendAsync(conn, "start-file", map[string]any{"playlist_entry_id": id})
+				fake.sendAsync(conn, "end-file", map[string]any{"playlist_entry_id": id, "reason": "eof"})
+			}
+		}
+		b := newBackendForFake(t, fake)
+		if err := b.Load(Track{ID: "burst", Path: "/tmp/burst.mp3", Generation: 1}); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		for i := 0; i < burst; i++ {
+			ev := mustEvent(t, b, 5*time.Second)
+			if ev.Type != EventEnd || ev.Generation != 1 {
+				t.Fatalf("event %d = %+v, want EventEnd{Generation:1}", i, ev)
+			}
+		}
+	})
+
+	t.Run("CloseCancelsEmitterAndIsIdempotent", func(t *testing.T) {
+		const burst = 200
+		fake := newFakeMpv(t)
+		fake.onLoad = func(conn net.Conn, _ ipcRequest) {
+			for i := 0; i < burst; i++ {
+				id := fake.nextEntryID()
+				fake.sendAsync(conn, "start-file", map[string]any{"playlist_entry_id": id})
+				fake.sendAsync(conn, "end-file", map[string]any{"playlist_entry_id": id, "reason": "eof"})
+			}
+		}
+		b := newBackendForFake(t, fake)
+		readerDone := make(chan struct{})
+		go func() {
+			defer close(readerDone)
+			for range b.Events() {
+			}
+		}()
+		if err := b.Load(Track{ID: "burst", Path: "/tmp/burst.mp3", Generation: 1}); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if err := b.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		select {
+		case <-readerDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("reader did not exit after Close")
+		}
+		if err := b.Close(); err != nil {
+			t.Fatalf("second Close: %v", err)
+		}
+		select {
+		case ev, ok := <-b.Events():
+			if ok {
+				t.Fatalf("post-Close event = %+v, want zero/closed", ev)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Events() did not close after Close")
+		}
+	})
+
+	t.Run("RecoveryClearsEntryGen", func(t *testing.T) {
+		// Causal proof: fake1 emits start-file(1) without end-file, leaving entryGen[1]=gen1.
+		// After crash + recovery, the stale end-file(1) from fake2 MUST be ignored.
+		fake1, fake2 := newFakeMpv(t), newFakeMpv(t)
+		b, err := NewMpvBackend(
+			WithBinary("/bin/cat"), WithSocketPath(fake1.sock),
+			WithReadyTimeout(2*time.Second), dialerCounter(fake1, fake2),
+		)
+		if err != nil {
+			t.Fatalf("NewMpvBackend: %v", err)
+		}
+		// Phase 1: fake1 injects ONLY start-file(1) and closes the conn so the
+		// readLoop drains the start-file before teardown returns, setting entryGen[1]=gen1.
+		fake1.onLoad = func(conn net.Conn, _ ipcRequest) {
+			id := fake1.nextEntryID()
+			fake1.sendAsync(conn, "start-file", map[string]any{"playlist_entry_id": id})
+			_ = conn.Close()
+		}
+		if err := b.Load(Track{ID: "t1", Path: "/tmp/t1.mp3", Generation: 1}); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		fake1.crash()
+		fake2.onLoad = func(conn net.Conn, _ ipcRequest) {
+			// Stale end-file(1) first — must be ignored.
+			fake2.sendAsync(conn, "end-file", map[string]any{"playlist_entry_id": 1, "reason": "eof"})
+			id := fake2.nextEntryID()
+			fake2.sendAsync(conn, "start-file", map[string]any{"playlist_entry_id": id})
+			fake2.sendAsync(conn, "end-file", map[string]any{"playlist_entry_id": id, "reason": "eof"})
+		}
+		if err := b.SetVolume(50); err != nil {
+			t.Fatalf("SetVolume: %v", err)
+		}
+		if err := b.Load(Track{ID: "t2", Path: "/tmp/t2.mp3", Generation: 2}); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		// First event MUST be EventEnd{Gen:2}; if clearEntryGen was disabled, stale gen would surface first.
+		ev := mustEvent(t, b, time.Second)
+		if ev.Type != EventEnd || ev.Generation != 2 {
+			t.Fatalf("event = %+v, want EventEnd{Gen:2}", ev)
+		}
+	})
 }
 
 func commandNames(cmds []ipcRequest) string {
