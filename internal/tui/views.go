@@ -21,6 +21,8 @@ const noCatalogTUIText = "No catalog found. Run `lofi sync` to download tracks."
 func viewNowPlaying(m Model) string {
 	var b strings.Builder
 	b.WriteString("lo-fi player - Now Playing\n\n")
+	b.WriteString(nowPlayingStatus(m))
+	b.WriteString("\n")
 	b.WriteString("[space] play/pause   [n] next   [b] prev   [+/-] volume\n")
 	b.WriteString("[a] attribution   [c] catalog   [q] queue\n")
 	if m.LastError != "" {
@@ -29,6 +31,21 @@ func viewNowPlaying(m Model) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// nowPlayingStatus renderiza la pista cargada y el modo de audio
+// activo. Deriva solo del Model, sin consultar el backend, para que dos
+// renders consecutivos del mismo estado sean identicos (VIS-1/FBK-1).
+func nowPlayingStatus(m Model) string {
+	loaded := m.LoadedID
+	if loaded == "" {
+		loaded = "none"
+	}
+	mode := m.AudioMode
+	if mode == "" {
+		mode = "unknown"
+	}
+	return fmt.Sprintf("loaded: %s   mode: %s\n", loaded, mode)
 }
 
 // viewNoCatalog muestra la guia de CATALOG-1 sin controles ni

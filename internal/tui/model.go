@@ -59,16 +59,44 @@ const volumeStep = 5
 // covers structure only). State is the optional live PlaybackState
 // (slice-3 B1/B5); when non-nil, volume and q/Ctrl+C persist via
 // tuiStatePersister.
+// Las tres identidades son distintas y no deben colapsarse:
+// SelectedIdx es la intencion del usuario, LoadedID lo que el backend
+// acepto en el ultimo Load exitoso y PlayingID lo que confirmo Play.
+// NextGeneration es el contador monotono de tokens de carga
+// (slice-4 #4877); LoadedGeneration es el token del Load vigente.
+// AudioMode etiqueta el backend activo para la guia visible (FBK-1) y
+// ResolvePath traduce un id de catalogo a su ruta en disco: la
+// composicion lo inyecta para que la TUI no conozca el layout de cache.
 type Model struct {
-	Backend     audio.AudioBackend
-	Catalog     *catalog.Catalog
-	Mode        Mode
-	SelectedIdx int
-	Volume      int
-	LastError   string
-	ErrCh       chan audio.Event
-	Playing     bool
-	State       *config.PlaybackState
+	Backend          audio.AudioBackend
+	Catalog          *catalog.Catalog
+	Mode             Mode
+	SelectedIdx      int
+	Volume           int
+	LastError        string
+	ErrCh            chan audio.Event
+	Playing          bool
+	State            *config.PlaybackState
+	LoadedID         string
+	PlayingID        string
+	LoadedGeneration uint64
+	NextGeneration   uint64
+	AudioMode        string
+	ResolvePath      func(trackID string) string
+}
+
+// hasTracks reporta si el catalogo puede sostener Load/Play (NAV-2).
+func (m Model) hasTracks() bool {
+	return m.Catalog != nil && len(m.Catalog.Tracks) > 0
+}
+
+// pathFor resuelve la ruta en disco via el seam inyectado; sin seam
+// devuelve cadena vacia y el backend decide como fallar.
+func (m Model) pathFor(trackID string) string {
+	if m.ResolvePath == nil {
+		return ""
+	}
+	return m.ResolvePath(trackID)
 }
 
 // NewModel builds a fresh Model with the default mode, volume, and

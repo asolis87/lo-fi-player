@@ -3,17 +3,18 @@ package tui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/asolis87/lo-fi-player/internal/audio"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // TestKeymap_SpaceTogglesPlayPause is mandatory: REQ-TUI-2 mandates
 // spacebar as play/pause. The TUI delegates to Backend.Play / Pause so
 // the port (MockBackend in tests, MpvBackend in production) owns the
-// semantics.
+// semantics. Slice 4 (NAV-2) exige catalogo no vacio: sin pistas la
+// transicion compartida inhibe Load y Play.
 func TestKeymap_SpaceTogglesPlayPause(t *testing.T) {
 	backend := audio.NewMockBackend()
-	m := NewModel(backend, nil, nil)
+	m := NewModel(backend, newFilledCatalog(), nil)
 
 	m = applyKey(m, spaceKeyMsg())
 	if !backend.Played() {
