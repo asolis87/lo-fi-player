@@ -11,14 +11,30 @@ reproductor opera sin red.
 
 ## Estado
 
-La cadena del slice #1 esta **embarcada**: las 11 unidades de trabajo
-del plan de PRs encadenados ya fueron fusionadas. Las cadenas del
-slice #2 (auditoria del seed del catalogo y bake del SHA de release)
-tambien estan **embarcadas**: PR-A (seed verificado de 4 pistas CC BY
-4.0), PR-B (parser de licencias y reportes de verificacion firmados),
-PR-C (re-staging del `manifest.json` con las pistas reales), PR-D
-(fix del loader drift: cada subdir por pista es obligatorio) y PR-E
-(pipeline de release con bake de SHA y gate de verificacion).
+Las cadenas de los slices 1–4 estan **embarcadas** en la rama tracker
+`feat/lo-fi-player`:
+
+- **Slice #1** — las 11 unidades de trabajo del plan encadenado ya
+  fueron fusionadas (esqueleto CLI/TUI + puerto `AudioBackend` +
+  adaptadores mpv/oto + fallback procedural + CLI + TUI Bubble Tea).
+- **Slice #2** — auditoria del seed del catalogo y bake del SHA de
+  release: PR-A (seed verificado de 4 pistas CC BY 4.0), PR-B
+  (parser de licencias y reportes de verificacion firmados), PR-C
+  (re-staging del `manifest.json` con las pistas reales), PR-D
+  (fix del loader drift: cada subdir por pista es obligatorio) y
+  PR-E (pipeline de release con bake de SHA y gate de
+  verificacion).
+- **Slice #3** — ciclo de vida persistente de reproduccion: estado
+  v2 + historial MRU, hidratacion al arrancar, prompt de
+  reanudacion TTY/non-TTY, persistencia de identidad al
+  cargar/reproducir y guardado en `q` / `Ctrl+C` + SIGINT/SIGTERM.
+- **Slice #4** — TUI real sobre backend + eventos + fallback:
+  contrato `audio.EventSource`, correlacion `start-file`/`end-file`
+  por generacion, identidades `Selected`/`Loaded`/`Playing`,
+  auto-avance circular en `EventEnd` valido, fallback a
+  `procedural:rain` ante `EventError` y cierre exacto-una-vez del
+  backend.
+
 CI en verde, binario compila y las pruebas pasan.
 
 | Area | Estado |
@@ -38,6 +54,20 @@ CI en verde, binario compila y las pruebas pasan.
 | Parser de licencias CC0/CC-BY/CC-BY-SA y reportes de verificacion | embarcado (PR-B) |
 | Fix del loader drift: `audio.mp3` y `track.json` obligatorios | embarcado (PR-D) |
 | Pipeline de release tag-triggered con bake de SHA + `verify-release-binary` | embarcado (PR-E) |
+| **Slice 3 — ciclo de vida persistente de reproduccion** | |
+| Schema v2 del store TOML + migracion desde v1 | embarcado (PR #25) |
+| `PlaybackState` (volumen + historial MRU, cap 25) con persistencia atomica | embarcado (PR #26) |
+| Hidratacion del estado al arrancar y guia `lofi sync` cuando no hay catalogo | embarcado (PR #27) |
+| Prompt de reanudacion TTY + auto-hidratacion non-TTY y filtrado del historial contra el catalogo | embarcado (PR #28) |
+| Persistencia de identidad al cargar/reproducir + guardado en `q`/`Ctrl+C` y en SIGINT/SIGTERM (5 s timeout) | embarcado (PR #29) |
+| Fix de wiring publico: limites del estado persistente en la sesion interactiva | embarcado (PR #30) |
+| **Slice 4 — TUI real sobre backend + eventos + fallback** | |
+| Fix de ruta del socket mpv en macOS (limite de 104 bytes de `sun_path`) | embarcado (PR #32) |
+| Contrato `audio.EventSource` con canal FIFO cerrable y generacion por carga | embarcado (PR #34) |
+| Correlacion `start-file`/`end-file` por `playlist_entry_id` en el adaptador mpv | embarcado (PR #36) |
+| TUI: identidades `Selected` / `Loaded` / `Playing` y transicion Load-Play-Persist protegida por generacion | embarcado (PR #38) |
+| Composicion interactiva: `audio.Select` con `WithMpvProbe` + `WithMpvFactory` y `Close` exacto-una-vez via `sync.Once` | embarcado (PR #40) |
+| Consumo de eventos + auto-avance circular y fallback a `procedural:rain` en runtime ante `EventError` | embarcado (PR #42) |
 
 El catalogo `catalog/v1/` que se embarca con el binario esta
 **verificado**: cuatro pistas CC BY 4.0 (LOFI LION y Lee Rosevere)
@@ -68,8 +98,26 @@ lofi sync
 lofi verify-release-binary <ruta-binario> <sha-esperado>
 ```
 
-- `lofi play` — abre la TUI (navegador de pistas, now-playing, cola y
-  vistas de atribucion; pulsa `?` dentro para ver el mapa de teclas).
+- `lofi play` — abre la TUI sobre el backend real. La composicion
+  invoca `audio.Select` con un probe de `mpv` (`exec.LookPath`) y un
+  factory privado; si no hay backend disponible imprime un mensaje
+  accionable en stderr y sale con codigo 1 sin levantar Bubble Tea.
+  La sesion interactiva carga el `PlaybackState` persistido, lanza
+  el prompt de reanudacion en TTY (auto-hidrata en non-TTY) y
+  mantiene tres identidades separadas: `SelectedIdx` (intencion),
+  `LoadedID` + `LoadedGeneration` (lo que el backend acepto en el
+  ultimo Load exitoso) y `PlayingID` (lo que confirmo Play). El
+  contrato `audio.EventSource` entrega `EventEnd` correlacionado por
+  generacion y `EventError`: un `EventEnd` cuya generacion coincide
+  con `LoadedGeneration` dispara auto-avance circular al siguiente
+  indice; uno con generacion obsoleta se descarta sin navegar, Load,
+  Play ni persistir. Un `EventError` actualiza el banner y, si el
+  seam `RebindBackend` esta cableado, intercambia el backend por
+  `procedural:rain` sin perder la obligacion de cerrar el backend
+  viejo. La sesion interactiva protege el cierre exacto-una-vez via
+  `sync.Once`, asi la TUI entrega el sink de audio al SO sin
+  doble-close. Pulsa `?`
+  dentro para ver el mapa de teclas.
 - `lofi play <track-id>` — reproduce una pista en modo headless y
   sale cuando termina.
 - `lofi play procedural:rain` — reproduce la estacion de lluvia
@@ -165,6 +213,41 @@ El repositorio esta bajo **MIT**. Ver [`LICENSE`](./LICENSE). Las
 licencias por pista del catalogo embarcado se exponen via
 `lofi credits` y la vista de atribucion de la TUI y permanecen
 independientes de la licencia del repositorio.
+
+## Siguiente etapa
+
+Esta seccion separa la **deuda tecnica** conocida del producto
+actual de las **mejoras candidatas** que aun no tienen fecha ni
+diseno cerrado. Ningun item de aqui pertenece a un slice #5
+empezado: cada uno tendra que pasar por una propuesta SDD antes de
+tocar codigo o documentacion.
+
+### Deuda tecnica
+
+- **Race en `oto/v3` bajo `-race` en macOS.** Las pruebas que crean
+  el dispositivo procedural pueden exponer una condicion dentro del
+  driver CoreAudio de `oto/v3`. Las suites enfocadas excluyen esos
+  casos conocidos mientras mantienen cobertura de carrera sobre el
+  resto del flujo.
+- **Falta un test directo** que verifique que `backend.Close()`
+  desbloquea al listener de eventos de la TUI. `ProceduralBackend.Close`
+  ya cierra el canal de eventos, pero falta probar de manera focal
+  que ese cierre libera un Cmd bloqueado. Ese test documentaria el
+  contrato de apagado para futuros adaptadores.
+
+### Trabajo de producto pendiente (sin priorizar)
+
+Candidatos mencionados por contribuidores o visibles en el codigo,
+**sin diseno cerrado** y sin compromiso de fecha:
+
+- Cola editable (reordenar / quitar pistas desde la TUI).
+- Busqueda y filtro por texto sobre el catalogo y la cola.
+- Seek y volumen con feedback visual: los puertos `Seek(int)` y
+  `SetVolume(int)` ya viven en `audio.AudioBackend`; solo falta la
+  capa de UI.
+- Favoritos separados del historial MRU.
+- Distribucion (Homebrew tap, paquetes `.deb` / `.rpm`, releases
+  firmados fuera del pipeline tag-triggered actual).
 
 ## Reconocimientos
 
