@@ -27,21 +27,34 @@ var ErrBackendUnavailable = errors.New("audio: backend unavailable")
 // Track is the minimal descriptor the audio backend needs to load a
 // playable item. Adapters translate catalog.Track into audio.Track at
 // the boundary; the port never imports the catalog package.
+//
+// Generation is the slice-4 correlation token assigned by the TUI
+// before each Load. Generation=0 is reserved for headless paths.
 type Track struct {
-	ID   string
-	Path string
+	ID         string
+	Path       string
+	Generation uint64
+}
+
+// EventSource is the optional interface a backend MAY implement to
+// emit asynchronous events. Events() returns a FIFO channel that is
+// closed once the backend's Close returns. Concrete adapters and
+// test doubles (mpv, procedural, mock) satisfy it; the CLI/TUI only
+// consume events from types that pass an EventSource type assertion.
+type EventSource interface {
+	Events() <-chan Event
 }
 
 // AudioBackend is the only audio port the CLI and TUI are allowed to
 // depend on. Concrete adapters (mpv, oto, ...) live inside this
 // package and satisfy this interface.
 type AudioBackend interface {
-	Load(Track) error   // prepare the track; MUST NOT start playback
-	Play() error        // start or resume playback of the loaded track
-	Pause() error       // suspend playback without unloading
-	Stop() error        // halt playback and rewind to the start
+	Load(Track) error    // prepare the track; MUST NOT start playback
+	Play() error         // start or resume playback of the loaded track
+	Pause() error        // suspend playback without unloading
+	Stop() error         // halt playback and rewind to the start
 	SetVolume(int) error // values outside [0, 100] return ErrVolumeOutOfRange
-	Seek(int) error     // jump to position in milliseconds
+	Seek(int) error      // jump to position in milliseconds
 	State() (playing bool, positionMS int, err error)
-	Close() error       // release every resource; MUST be idempotent
+	Close() error // release every resource; MUST be idempotent
 }

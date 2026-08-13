@@ -1,10 +1,65 @@
 package audio
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // Compile-time assertion: MockBackend MUST satisfy the AudioBackend
 // port.
 var _ AudioBackend = (*MockBackend)(nil)
+
+// TestPortContract: Track.Generation, EventSource contract, and
+// S-EVT-3-drain FIFO behaviour. mpv's generation correlation on
+// Event is part of PR-1B and is NOT covered here.
+func TestPortContract(t *testing.T) {
+	t.Run("Track/Generation", func(t *testing.T) {
+		tr := Track{ID: "x", Path: "/tmp/x.mp3", Generation: 42}
+		if tr.Generation != 42 {
+			t.Fatalf("Track.Generation = %d, want 42", tr.Generation)
+		}
+	})
+
+	t.Run("EventSource/Backends", func(t *testing.T) {
+		// Every backend MUST satisfy EventSource; the TUI only
+		// consumes events from types that pass the assertion.
+		var _ EventSource = (*MockBackend)(nil)
+		var _ EventSource = (*ProceduralBackend)(nil)
+		var _ EventSource = (*MpvBackend)(nil)
+	})
+
+	t.Run("S-EVT-3-drain", func(t *testing.T) {
+		// Three back-to-back events surface in FIFO order; the
+		// channel is closed when the backend shuts down. Generation
+		// correlation is not asserted here — that contract lives in
+		// the mpv adapter and lands in PR-1B.
+		m := NewMockBackend()
+		defer func() { _ = m.Close() }()
+		for i := 0; i < 3; i++ {
+			m.EmitEnd()
+		}
+		for i := 0; i < 3; i++ {
+			ev := mustEvent(t, m, time.Second)
+			if ev.Type != EventEnd {
+				t.Fatalf("event %d type = %v, want %v", i, ev.Type, EventEnd)
+			}
+		}
+	})
+}
+
+func mustEvent(t *testing.T, src EventSource, d time.Duration) Event {
+	t.Helper()
+	select {
+	case ev, ok := <-src.Events():
+		if !ok {
+			t.Fatalf("event channel closed before receiving expected event")
+		}
+		return ev
+	case <-time.After(d):
+		t.Fatalf("timed out after %v waiting for event", d)
+	}
+	return Event{}
+}
 
 func TestMockBackend_RecordsCalls(t *testing.T) {
 	m := NewMockBackend()

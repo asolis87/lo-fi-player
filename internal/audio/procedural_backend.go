@@ -29,6 +29,7 @@ type ProceduralBackend struct {
 	pumpCtx    context.Context
 	pumpCancel context.CancelFunc
 	pumpDone   chan struct{}
+	events     chan Event
 }
 
 // ProceduralOption configures a ProceduralBackend.
@@ -78,6 +79,7 @@ func NewProceduralBackend(opts ...ProceduralOption) *ProceduralBackend {
 		sampleRate: 44100,
 		bufferSize: defaultProceduralBufferSize,
 		volume:     100,
+		events:     make(chan Event, defaultProceduralBufferSize),
 	}
 	for _, opt := range opts {
 		opt(b)
@@ -88,6 +90,9 @@ func NewProceduralBackend(opts ...ProceduralOption) *ProceduralBackend {
 	b.buf = make([]int16, b.bufferSize)
 	return b
 }
+
+// Events returns the read-only event stream.
+func (b *ProceduralBackend) Events() <-chan Event { return b.events }
 
 // Generator returns the wrapped SampleGenerator. Used by Select()
 // to detect the default generator type and by callers that need
@@ -244,9 +249,7 @@ func (b *ProceduralBackend) State() (bool, int, error) {
 	return b.playing, posMS, nil
 }
 
-// Close permanently shuts the backend down. Idempotent: a second
-// call is a no-op that returns nil so callers can defer it
-// without worrying about double-close from cleanup paths.
+// Close permanently shuts the backend down. Idempotent.
 func (b *ProceduralBackend) Close() error {
 	b.mu.Lock()
 	if b.closed {
@@ -263,6 +266,7 @@ func (b *ProceduralBackend) Close() error {
 	if device != nil {
 		_ = device.Close()
 	}
+	close(b.events)
 	return nil
 }
 

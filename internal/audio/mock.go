@@ -14,11 +14,38 @@ type MockBackend struct {
 	seeked  []int
 	volume  int
 	closed  int
+	events  chan Event
 }
 
-// NewMockBackend returns a MockBackend with default volume 0 and an
-// empty call log.
-func NewMockBackend() *MockBackend { return &MockBackend{} }
+// mockEventBufferSize bounds the MockBackend's event channel; the
+// PR-1A burst contract (>4 events without loss) drives the size.
+const mockEventBufferSize = 64
+
+// NewMockBackend returns a MockBackend with default volume 0, an
+// empty call log, and a buffered event channel.
+func NewMockBackend() *MockBackend {
+	return &MockBackend{events: make(chan Event, mockEventBufferSize)}
+}
+
+// Events returns the read-only event stream. Closed by Close.
+func (m *MockBackend) Events() <-chan Event { return m.events }
+
+// EmitEvent pushes ev onto the FIFO stream. No-op when closed.
+// Generation correlation is not the test double's job — mpv owns
+// that contract (PR-1B).
+func (m *MockBackend) EmitEvent(ev Event) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed > 0 {
+		return
+	}
+	m.events <- ev
+}
+
+// EmitEnd is a convenience wrapper for EventEnd events.
+func (m *MockBackend) EmitEnd() {
+	m.EmitEvent(Event{Type: EventEnd})
+}
 
 func (m *MockBackend) Load(t Track) error {
 	m.mu.Lock()
@@ -71,10 +98,16 @@ func (m *MockBackend) State() (bool, int, error) {
 	return m.played && !m.paused && !m.stopped, 0, nil
 }
 
+// Close releases every resource and closes the event stream once.
+// Idempotent: subsequent calls return nil and do not double-close
+// the events channel.
 func (m *MockBackend) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.closed++
+	if m.closed == 1 {
+		close(m.events)
+	}
 	return nil
 }
 
