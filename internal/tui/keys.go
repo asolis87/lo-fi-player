@@ -3,6 +3,7 @@ package tui
 import (
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/asolis87/lo-fi-player/internal/audio"
 	"github.com/asolis87/lo-fi-player/internal/config"
 )
 
@@ -106,27 +107,76 @@ func (m Model) applyAction(a keyAction) (tea.Model, tea.Cmd) {
 	case actionVolDown:
 		return m.bumpVolume(-volumeStep), nil
 	case actionNext:
-		return m.advanceQueue(1), nil
+		return m.loadAndPlaySelected(1), nil
 	case actionPrev:
-		return m.advanceQueue(-1), nil
+		return m.loadAndPlaySelected(-1), nil
 	}
 	return m, nil
 }
 
-// togglePlay delegates to the AudioBackend port. It does NOT call
-// Load because the queue selection belongs to PR #9 (CLI dispatch
-// + queue); the MockBackend in slice-1 tests just flips its
-// in-memory flag.
+// togglePlay comparte la transicion con n/b: sin pista cargada carga y
+// reproduce la seleccion vigente; sonando pausa preservando identidad;
+// pausado reanuda sin consumir una nueva generacion ni volver a
+// persistir (no es un cambio de pista).
 func (m Model) togglePlay() Model {
-	playing, _, _ := m.Backend.State()
-	if playing {
+	if playing, _, _ := m.Backend.State(); playing {
 		if err := m.Backend.Pause(); err == nil {
 			m.Playing = false
 		}
 		return m
 	}
-	if err := m.Backend.Play(); err == nil {
-		m.Playing = true
+	if m.LoadedID != "" {
+		if err := m.Backend.Play(); err != nil {
+			m.LastError = "play: " + err.Error()
+			return m
+		}
+		m.Playing, m.PlayingID = true, m.LoadedID
+		return m
+	}
+	return m.loadAndPlaySelected(0)
+}
+
+// loadAndPlaySelected es la unica transicion de carga+reproduccion que
+// comparten n, b y space. Orden fijo: elegir objetivo con wraparound,
+// consumir una generacion, Load(Track{Generation}) y luego Play.
+// Loaded* solo avanza tras Load exitoso; Playing* e historial solo tras
+// Play exitoso, y la persistencia ocurre exactamente una vez por
+// transicion exitosa (NAV-1 + PERSIST-1). Un catalogo nil o vacio no
+// invoca Load ni Play (NAV-2).
+func (m Model) loadAndPlaySelected(delta int) Model {
+	if !m.hasTracks() {
+		return m
+	}
+	m = m.advanceQueue(delta)
+	track := m.Catalog.Tracks[m.SelectedIdx]
+	m.NextGeneration++
+	gen := m.NextGeneration
+	if err := m.Backend.Load(audio.Track{ID: track.ID, Path: m.pathFor(track.ID), Generation: gen}); err != nil {
+		m.LastError = "load: " + err.Error()
+		return m
+	}
+	m.LoadedID, m.LoadedGeneration, m.LastError = track.ID, gen, ""
+	if err := m.Backend.Play(); err != nil {
+		m.LastError = "play: " + err.Error()
+		return m
+	}
+	m.Playing, m.PlayingID = true, track.ID
+	return m.recordPlayed(track.ID)
+}
+
+// recordPlayed registra la pista al frente del historial MRU y persiste
+// una sola vez via el seam existente. Un fallo deja audio y sesion
+// activos y solo levanta el banner (PERSIST-1 saveFail).
+func (m Model) recordPlayed(trackID string) Model {
+	if m.State == nil {
+		return m
+	}
+	if err := m.State.RecordPlayed(trackID); err != nil {
+		m.LastError = "save state: " + err.Error()
+		return m
+	}
+	if err := tuiStatePersister(); err != nil {
+		m.LastError = "save state: " + err.Error()
 	}
 	return m
 }
