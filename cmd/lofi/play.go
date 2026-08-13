@@ -133,9 +133,14 @@ func runPlay(args []string) error {
 }
 
 // runHeadlessPlay: Load -> Play -> RecordPlayed+Persist -> waitForSignal
-// -> cliSignalFinalize -> Close. State is best-effort: nil still plays.
+// -> cliSignalFinalize -> Close. Catalog tracks consultan lock; procedural: rain NO (REQ-MVP-2).
 func runHeadlessPlay(target string) error {
 	state := config.LoadPlaybackState()
+	if !strings.HasPrefix(target, "procedural:") {
+		if err := consumerLockGuard("play"); err != nil {
+			return err
+		}
+	}
 
 	backend, audioPath, err := resolveHeadlessBackend(target)
 	if err != nil {

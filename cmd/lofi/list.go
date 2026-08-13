@@ -16,6 +16,7 @@ import (
 // sorted by track id by default, and emits JSON when --json is
 // supplied. A missing cache is non-fatal in the sense that we
 // print a `lofi sync` hint and exit 1 instead of crashing.
+// Guard de lock: si sync esta activo, exit 1 (REQ-MVP-2).
 func runList(args []string) error {
 	jsonMode := false
 	for _, arg := range args {
@@ -26,6 +27,10 @@ func runList(args []string) error {
 			fmt.Fprintf(os.Stderr, "lofi list: unexpected argument %q\n\n%s", arg, usage)
 			return &commandError{code: 2}
 		}
+	}
+
+	if err := consumerLockGuard("list"); err != nil {
+		return err
 	}
 
 	cacheRoot, err := catalogCacheDir()
