@@ -21,13 +21,10 @@ const (
 	// Atomic staging writes a sibling named ".tmp-<pid>-*" and
 	// renames it over this target in one os.Rename call.
 	manifestFileName = "manifest.json"
-
-	// maxManifestBytes caps the body Fetch will read so a hostile
-	// or buggy server cannot exhaust memory. 8 MiB is far above
-	// the largest shipped manifest and far below anything that
-	// matters for process memory.
-	maxManifestBytes = 8 * 1024 * 1024
 )
+
+// maxManifestBytes lives in limits.go (PR-2B) — unica fuente
+// de verdad para el limite de manifest.
 
 // ErrOffline is wrapped around every Fetch / Sync failure whose
 // root cause is the network being unreachable, the remote
