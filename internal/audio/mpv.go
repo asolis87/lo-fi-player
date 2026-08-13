@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,9 +35,11 @@ const (
 	EventEnd   EventType = "end-file"
 )
 
+// Event is a single async notification. Generation is the slice-4 correlation token; 0 is valid (headless).
 type Event struct {
-	Type    EventType
-	Message string
+	Type       EventType
+	Message    string
+	Generation uint64
 }
 
 type ipcRequest struct {
@@ -53,7 +56,7 @@ type ipcReply struct {
 
 type Option func(*MpvBackend)
 
-func WithBinary(p string) Option             { return func(b *MpvBackend) { b.bin = p } }
+func WithBinary(p string) Option              { return func(b *MpvBackend) { b.bin = p } }
 func WithSocketPath(p string) Option          { return func(b *MpvBackend) { b.socketPath = p } }
 func WithTempDir(d string) Option             { return func(b *MpvBackend) { b.tmpDir = d } }
 func WithReadyTimeout(d time.Duration) Option { return func(b *MpvBackend) { b.readyTimeout = d } }
@@ -83,20 +86,39 @@ type MpvBackend struct {
 	stickyErr error
 	events    chan Event
 	readerWG  sync.WaitGroup
+
+	// PR-1B: pendingGen = most recent Load's Generation. entryGen = entry_id → Generation; cleared on recovery and Close.
+	// pendingEvents{Mu,Cond,Head,Tail,Closed} = unbounded FIFO. emitterCancel unblocks a wedged emitter.
+	pendingGen          uint64
+	entryGen            map[int]uint64
+	entryGenMu          sync.Mutex
+	pendingEventsMu     sync.Mutex
+	pendingEventsCond   *sync.Cond
+	pendingEventsHead   *eventNode
+	pendingEventsTail   *eventNode
+	pendingEventsClosed bool
+	emitterCancel       chan struct{}
+	emitterDone         chan struct{}
 }
 
-// NewMpvBackend validates the binary path (returning ErrMpvNotFound
-// when missing) and allocates a private temp dir for the socket,
-// but does NOT spawn the subprocess; the first AudioBackend call
-// triggers the lazy start.
+type eventNode struct {
+	ev   Event
+	next *eventNode
+}
+
+// NewMpvBackend validates the binary path and allocates a private temp dir for the socket.
 func NewMpvBackend(opts ...Option) (*MpvBackend, error) {
 	b := &MpvBackend{
-		bin:          "mpv",
-		readyTimeout: 2 * time.Second,
-		recoverMax:   1,
-		events:       make(chan Event, 4),
-		pending:      make(map[int]chan *ipcReply),
+		bin:           "mpv",
+		readyTimeout:  2 * time.Second,
+		recoverMax:    1,
+		events:        make(chan Event, 64),
+		pending:       make(map[int]chan *ipcReply),
+		entryGen:      make(map[int]uint64),
+		emitterCancel: make(chan struct{}),
+		emitterDone:   make(chan struct{}),
 	}
+	b.pendingEventsCond = sync.NewCond(&b.pendingEventsMu)
 	for _, opt := range opts {
 		opt(b)
 	}
@@ -119,6 +141,8 @@ func NewMpvBackend(opts ...Option) (*MpvBackend, error) {
 		b.tmpDir = dir
 		b.socketPath = filepath.Join(dir, "ipc.sock")
 	}
+
+	go b.eventEmitter()
 	return b, nil
 }
 
@@ -127,7 +151,9 @@ func (b *MpvBackend) Events() <-chan Event { return b.events }
 var _ AudioBackend = (*MpvBackend)(nil)
 
 func (b *MpvBackend) Load(t Track) error {
-	if err := b.call(context.Background(), []any{"loadfile", t.Path, "append"}); err != nil {
+	// Record the TUI-assigned correlation token before the IPC call.
+	atomic.StoreUint64(&b.pendingGen, t.Generation)
+	if err := b.call(context.Background(), []any{"loadfile", t.Path, "replace"}); err != nil {
 		return err
 	}
 	b.mu.Lock()
@@ -187,8 +213,7 @@ func (b *MpvBackend) State() (bool, int, error) {
 	return b.playing, 0, nil
 }
 
-// Close permanently shuts the backend down. It is idempotent; the
-// socket file and any auto-created temp directory are removed.
+// Close permanently shuts the backend down. Idempotent.
 func (b *MpvBackend) Close() error {
 	b.mu.Lock()
 	if b.closed {
@@ -200,6 +225,28 @@ func (b *MpvBackend) Close() error {
 	b.mu.Unlock()
 
 	b.teardown()
+
+	// Wake the emitter from its cond wait.
+	b.pendingEventsMu.Lock()
+	b.pendingEventsClosed = true
+	b.pendingEventsCond.Broadcast()
+	b.pendingEventsMu.Unlock()
+
+	// Unblock an emitter parked on the send to the consumer.
+	// Safe to close exactly once: later Close calls return at top.
+	close(b.emitterCancel)
+
+	// Wait for the emitter to exit before closing events —
+	// otherwise it could panic on a send to a closed channel.
+	<-b.emitterDone
+
+	// Sole owner of events from here on; emitter has exited.
+	close(b.events)
+
+	// Safety net: clear correlation state. handleFailure already
+	// clears on recovery, but Close must be self-sufficient.
+	b.clearEntryGen()
+
 	if b.tmpDir != "" {
 		_ = os.RemoveAll(b.tmpDir)
 	}
@@ -393,11 +440,7 @@ func (b *MpvBackend) send(ctx context.Context, command []any, canRecover bool) (
 	}
 }
 
-// handleFailure tears the dead connection down and tries one fresh
-// start (subject to recoverMax). The retry uses canRecover=false to
-// guarantee termination. On the second failure the backend
-// transitions to the sticky-error state, emits EventError, and
-// every subsequent call returns ErrBackendUnavailable.
+// handleFailure tears the dead connection down and tries one fresh start. On the second failure the backend goes sticky.
 func (b *MpvBackend) handleFailure(ctx context.Context, command []any, cause error) (*ipcReply, error) {
 	b.mu.Lock()
 	if b.closed {
@@ -414,6 +457,8 @@ func (b *MpvBackend) handleFailure(ctx context.Context, command []any, cause err
 	b.mu.Unlock()
 
 	b.teardown()
+	// Old process dead: its entry_id mappings are meaningless on the new process.
+	b.clearEntryGen()
 
 	ctx, cancel := context.WithTimeout(ctx, b.readyTimeout)
 	defer cancel()
@@ -424,13 +469,28 @@ func (b *MpvBackend) handleFailure(ctx context.Context, command []any, cause err
 	if err := b.handshake(ctx); err != nil {
 		return nil, b.setSticky(err)
 	}
-	return b.send(ctx, command, false)
+	reply, err := b.send(ctx, command, false)
+	if err == nil {
+		b.mu.Lock()
+		b.ready = true
+		b.mu.Unlock()
+	}
+	return reply, err
 }
 
 func (b *MpvBackend) tryRecover(ctx context.Context) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.recovered < b.recoverMax && !b.closed
+}
+
+// clearEntryGen drops every entry_id → Generation binding.
+func (b *MpvBackend) clearEntryGen() {
+	b.entryGenMu.Lock()
+	for k := range b.entryGen {
+		delete(b.entryGen, k)
+	}
+	b.entryGenMu.Unlock()
 }
 
 func (b *MpvBackend) setSticky(err error) error {
@@ -443,10 +503,7 @@ func (b *MpvBackend) setStickyLocked(err error) error {
 	wrapped := fmt.Errorf("%w: %s", ErrBackendUnavailable, err.Error())
 	b.stickyErr = wrapped
 	b.ready = false
-	select {
-	case b.events <- Event{Type: EventError, Message: wrapped.Error()}:
-	default:
-	}
+	b.enqueue(Event{Type: EventError, Message: wrapped.Error()})
 	return wrapped
 }
 
@@ -493,13 +550,88 @@ func (b *MpvBackend) readLoop() {
 }
 
 func (b *MpvBackend) forwardEvent(reply ipcReply) {
-	ev := Event{Type: EventType(reply.Event), Message: reply.Event}
-	if len(reply.Data) > 0 {
-		ev.Message = ev.Message + " " + string(reply.Data)
-	}
-	select {
-	case b.events <- ev:
+	switch reply.Event {
+	case "start-file":
+		var data struct {
+			PlaylistEntryID int `json:"playlist_entry_id"`
+		}
+		if err := json.Unmarshal(reply.Data, &data); err != nil {
+			return
+		}
+		gen := atomic.LoadUint64(&b.pendingGen)
+		b.entryGenMu.Lock()
+		b.entryGen[data.PlaylistEntryID] = gen
+		b.entryGenMu.Unlock()
+	case "end-file":
+		var data struct {
+			PlaylistEntryID int    `json:"playlist_entry_id"`
+			Reason          string `json:"reason"`
+		}
+		if err := json.Unmarshal(reply.Data, &data); err != nil {
+			return
+		}
+		// Unknown / stale end-file: emit nothing.
+		b.entryGenMu.Lock()
+		gen, ok := b.entryGen[data.PlaylistEntryID]
+		if ok {
+			delete(b.entryGen, data.PlaylistEntryID)
+		}
+		b.entryGenMu.Unlock()
+		if !ok {
+			return
+		}
+		b.enqueue(Event{Type: EventEnd, Message: data.Reason, Generation: gen})
 	default:
+		ev := Event{Type: EventType(reply.Event), Message: reply.Event}
+		if len(reply.Data) > 0 {
+			ev.Message = ev.Message + " " + string(reply.Data)
+		}
+		b.enqueue(ev)
+	}
+}
+
+// enqueue appends ev to the unbounded FIFO. Non-blocking.
+func (b *MpvBackend) enqueue(ev Event) bool {
+	b.pendingEventsMu.Lock()
+	defer b.pendingEventsMu.Unlock()
+	if b.pendingEventsClosed {
+		return false
+	}
+	node := &eventNode{ev: ev}
+	if b.pendingEventsTail == nil {
+		b.pendingEventsHead = node
+	} else {
+		b.pendingEventsTail.next = node
+	}
+	b.pendingEventsTail = node
+	b.pendingEventsCond.Signal()
+	return true
+}
+
+func (b *MpvBackend) eventEmitter() {
+	defer close(b.emitterDone)
+	for {
+		b.pendingEventsMu.Lock()
+		for b.pendingEventsHead == nil && !b.pendingEventsClosed {
+			b.pendingEventsCond.Wait()
+		}
+		if b.pendingEventsHead == nil && b.pendingEventsClosed {
+			b.pendingEventsMu.Unlock()
+			return
+		}
+		node := b.pendingEventsHead
+		b.pendingEventsHead = node.next
+		if b.pendingEventsHead == nil {
+			b.pendingEventsTail = nil
+		}
+		b.pendingEventsMu.Unlock()
+		// Without the cancel case a wedged consumer would
+		// deadlock Close forever.
+		select {
+		case b.events <- node.ev:
+		case <-b.emitterCancel:
+			return
+		}
 	}
 }
 
