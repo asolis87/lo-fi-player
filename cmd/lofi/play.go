@@ -28,6 +28,15 @@ import (
 // $PATH or a working procedural fallback.
 var selectAudioBackend = audio.Select
 
+// mpvBackendFactory is the package-level seam the interactive
+// selector wires via audio.WithMpvFactory. Production builds a
+// real *audio.MpvBackend; tests swap the variable for a function
+// that records the call and returns a stub backend so the
+// production code path can be exercised without an mpv binary.
+var mpvBackendFactory = func() (audio.AudioBackend, error) {
+	return audio.NewMpvBackend()
+}
+
 // tuiLauncher runs the Bubble Tea program. Production wires
 // tea.WithoutSignalHandler so Bubble Tea does NOT install its own
 // SIGINT/SIGTERM trap — watchTUISignals owns the OS signal path.
