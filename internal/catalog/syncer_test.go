@@ -235,113 +235,125 @@ func TestSync_OfflineDoesNotMutateCache(t *testing.T) {
 // below) is the same one the offline-test paths use; this test
 // proves the same plumbing lights up cleanly when the server
 // returns a well-formed body.
-func TestSync_HappyPath_RoundTrip(t *testing.T) {
-	want := validCatalog()
-	body, err := json.Marshal(want)
-	if err != nil {
-		t.Fatalf("marshal fixture: %v", err)
-	}
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(body)
-	}))
-	t.Cleanup(srv.Close)
-
-	dir := t.TempDir()
-	syn := NewSyncer(dir)
-	syn.HTTPClient = &http.Client{Transport: urlRewriteTransport{target: srv.URL}}
-	url := pinnedSHAURL(t, srv.URL)
-
-	if err := syn.Sync(context.Background(), url); err != nil {
-		t.Fatalf("Sync(happy path) = %v, want nil", err)
-	}
-	if got := hits.Load(); got != 1 {
-		t.Fatalf("server hit %d times, want exactly 1 (Fetch+Apply, no retries)", got)
-	}
-
-	target := filepath.Join(dir, "manifest.json")
-	gotBytes, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatalf("read cache manifest: %v", err)
-	}
-	var got Catalog
-	if err := json.Unmarshal(gotBytes, &got); err != nil {
-		t.Fatalf("cache manifest is not parseable JSON: %v\n%s", err, gotBytes)
-	}
-	if got.SchemaVersion != want.SchemaVersion || got.Version != want.Version {
-		t.Fatalf("round-tripped catalog = %+v, want %+v", got, want)
-	}
-	if len(got.Tracks) != 1 || got.Tracks[0].ID != want.Tracks[0].ID {
-		t.Fatalf("round-tripped tracks = %+v, want single track id=%q", got.Tracks, want.Tracks[0].ID)
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("ReadDir(%s): %v", dir, err)
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".tmp-") {
-			t.Fatalf("leftover staging file after happy path: %s", e.Name())
-		}
-	}
-}
-
-// TestSync_AppliesRealManifest proves that after a successful
-// end-to-end Sync, the file LoadFromFile reads back is the SAME
-// manifest body the server returned (byte-for-byte), so the
-// runtime contract "the cache IS the pinned manifest" holds.
-func TestSync_AppliesRealManifest(t *testing.T) {
-	want := validCatalog()
-	body, err := json.Marshal(want)
-	if err != nil {
-		t.Fatalf("marshal fixture: %v", err)
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(body)
-	}))
-	t.Cleanup(srv.Close)
-
-	dir := t.TempDir()
-	syn := NewSyncer(dir)
-	syn.HTTPClient = &http.Client{Transport: urlRewriteTransport{target: srv.URL}}
-	url := pinnedSHAURL(t, srv.URL)
-
-	if err := syn.Sync(context.Background(), url); err != nil {
-		t.Fatalf("Sync: %v", err)
-	}
-
-	loaded, err := LoadFromFile(filepath.Join(dir, "manifest.json"))
-	if err != nil {
-		t.Fatalf("LoadFromFile on synced cache: %v", err)
-	}
-	if loaded.Version != want.Version {
-		t.Fatalf("loaded.Version = %q, want %q", loaded.Version, want.Version)
-	}
-	if len(loaded.Tracks) != 1 || loaded.Tracks[0].ID != want.Tracks[0].ID {
-		t.Fatalf("loaded.Tracks = %+v, want single track id=%q", loaded.Tracks, want.Tracks[0].ID)
-	}
-}
-
 // pinnedSHAURL builds the immutable manifest URL ValidateURL
-// requires, pointed at the httptest server. The URL the test
-// server actually answers lives at srv.URL (a 127.0.0.1:port
-// http URL); the Syncer uses urlRewriteTransport below to map
-// the raw.githubusercontent.com URL back onto the test server.
+// requires, pointed at the httptest server via the ?srv= query
+// parameter that urlRewriteTransport below maps onto the test
+// server. The Syncer sees a real GitHub URL while the bytes come
+// from httptest.
 func pinnedSHAURL(t *testing.T, srvURL string) string {
 	t.Helper()
 	return "https://raw.githubusercontent.com/lofi-player/localhost/" + pinnedSHA + "/catalog/v1/manifest.json?srv=" + strings.TrimPrefix(srvURL, "http://")
 }
 
-// urlRewriteTransport forwards every request to a single fixed
-// http endpoint regardless of the URL the Syncer hands it. We
-// carry the real server address in a query parameter so the
-// pinned-SHA URL the test builds can stay shaped like a real
-// GitHub URL while the bytes actually come from httptest.
+// TestSync_FullAssets_12GETs (PR-R1a A1/A2): a 4-track manifest
+// served over httptest MUST drive 12 asset GETs (4 tracks × 3)
+// on top of the manifest GET, populate v1 with manifest.json +
+// four subdirs each carrying track.json/audio.mp3/LICENSE.txt,
+// and verify audio.mp3 SHA matches Track.ChecksumSHA256 (PR-2A).
+func TestSync_FullAssets_12GETs(t *testing.T) {
+	wantIDs := []string{
+		"bigger-questions",
+		"going-in-circles",
+		"it-was-like-that-when-i-got-here",
+		"lofi-lion-tame-the-beast",
+	}
+	tracks := make([]Track, 0, len(wantIDs))
+	for _, id := range wantIDs {
+		tr := validTrack()
+		tr.ID = id
+		tracks = append(tracks, tr)
+	}
+	want := &Catalog{
+		SchemaVersion: CurrentSchemaVersion,
+		Version:       "v1.0",
+		Tracks:        tracks,
+	}
+	manifestBytes, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	var hits, audioHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/manifest.json"):
+			_, _ = w.Write(manifestBytes)
+		case strings.HasSuffix(r.URL.Path, "/audio.mp3"):
+			audioHits.Add(1)
+			_, _ = w.Write([]byte(audioFixtureBytes))
+		case strings.HasSuffix(r.URL.Path, "/track.json"):
+			id := r.URL.Path[strings.LastIndex(strings.TrimSuffix(r.URL.Path, "/track.json"), "/")+1:]
+			tr := validTrack()
+			tr.ID = id
+			data, _ := json.MarshalIndent(tr, "", "  ")
+			_, _ = w.Write(data)
+		case strings.HasSuffix(r.URL.Path, "/LICENSE.txt"):
+			_, _ = w.Write([]byte("CC-BY-4.0\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	syn := NewSyncer(filepath.Join(dir, "v1"))
+	syn.HTTPClient = &http.Client{Transport: urlRewriteTransport{target: srv.URL}}
+	syn.Sleeper = noOpSleeper{}
+	url := pinnedSHAURL(t, srv.URL)
+
+	if err := syn.Sync(context.Background(), url); err != nil {
+		t.Fatalf("Sync(12 GETs) = %v, want nil", err)
+	}
+
+	if got := audioHits.Load(); got != 4 {
+		t.Fatalf("audio.mp3 hits = %d, want 4", got)
+	}
+	if got := hits.Load(); got != 13 {
+		t.Fatalf("server hits = %d, want 13 (1 manifest + 12 assets)", got)
+	}
+
+	v1 := filepath.Join(dir, "v1")
+	if _, err := os.Stat(filepath.Join(v1, "manifest.json")); err != nil {
+		t.Fatalf("manifest.json missing: %v", err)
+	}
+	for _, id := range wantIDs {
+		trackDir := filepath.Join(v1, id)
+		for _, name := range []string{"track.json", "audio.mp3", "LICENSE.txt"} {
+			if _, err := os.Stat(filepath.Join(trackDir, name)); err != nil {
+				t.Fatalf("missing %s/%s: %v", id, name, err)
+			}
+		}
+		if err := Verify(filepath.Join(trackDir, "audio.mp3"), want.Tracks[0].ChecksumSHA256); err != nil {
+			t.Fatalf("SHA gate failed for %s: %v", id, err)
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) > 1 {
+		for _, e := range entries {
+			if strings.Contains(e.Name(), "staging-") {
+				t.Fatalf("leftover staging dir: %s", e.Name())
+			}
+		}
+	}
+
+	cat, err := LoadFromDir(v1)
+	if err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	if got, want := len(cat.Tracks), 4; got != want {
+		t.Fatalf("len(Tracks) = %d, want %d", got, want)
+	}
+	for i, id := range wantIDs {
+		if cat.Tracks[i].ID != id {
+			t.Fatalf("Tracks[%d].ID = %q, want %q", i, cat.Tracks[i].ID, id)
+		}
+	}
+}
+
+// urlRewriteTransport forwards every request to a fixed httptest
+// endpoint. The real server address is carried in a query param
+// so the pinned-SHA URL stays shaped like a real GitHub URL.
+// The request path is preserved so the fixture's per-asset
+// dispatch sees the original URL (PR-R1a).
 type urlRewriteTransport struct {
 	target string
 }
@@ -351,11 +363,16 @@ func (t urlRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if raw == "" {
 		raw = t.target
 	}
+	// raw is an httptest URL like "http://127.0.0.1:56530"; the
+	// trimmed prefix is "127.0.0.1:56530" which Go's URL parser
+	// would mis-classify as a path with an embedded colon. We
+	// split on "/" instead so the host+port round-trips verbatim.
+	hostPort := strings.TrimPrefix(raw, "http://")
 	cloned := req.Clone(req.Context())
 	cloned.URL = &url.URL{
 		Scheme: "http",
-		Host:   strings.TrimPrefix(raw, "http://"),
-		Path:   "/",
+		Host:   hostPort,
+		Path:   req.URL.Path,
 	}
 	cloned.RequestURI = ""
 	return http.DefaultTransport.RoundTrip(cloned)
