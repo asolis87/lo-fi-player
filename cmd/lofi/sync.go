@@ -87,6 +87,7 @@ func runSync(args []string) error {
 
 	url := catalog.ResolveManifestURL(syncRepo, syncOwner, catalog.FirstRunCommitSHA)
 	syn := syncerFactory(cacheRoot)
+	syn.Progress = &catalog.StderrReporter{Writer: os.Stderr}
 
 	if err := syn.Sync(ctx, url); err != nil {
 		lastSyncErr = err

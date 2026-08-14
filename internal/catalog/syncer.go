@@ -62,11 +62,13 @@ type HTTPClient interface {
 // it atomically to the local cache. HTTPClient is injectable so
 // tests can simulate offline behaviour; CacheDir is the directory
 // Apply will populate with the target manifest file. Sleeper is
-// optional (PR-6): nil falls back to RealSleeper.
+// optional (PR-6): nil falls back to RealSleeper. Progress is
+// optional (PR-6B): nil falls back to NullProgressReporter.
 type Syncer struct {
 	HTTPClient HTTPClient
 	CacheDir   string
 	Sleeper    Sleeper
+	Progress   ProgressReporter
 }
 
 // NewSyncer returns a Syncer backed by http.DefaultClient and the
@@ -165,8 +167,15 @@ func (s *Syncer) Apply(c *Catalog) error {
 // leave the local cache untouched (S-CAT-2); callers can match
 // ErrOffline with errors.Is to surface a recoverable message.
 // PR-6 wraps Fetch in the canonical retry policy (3 attempts,
-// 1s+2s sleeps). Progress reporting is deferred to PR-6B.
+// 1s+2s sleeps). PR-6B wires the progress seam: each observable
+// operation emits a start event, then a done event (with Err set
+// when the operation failed). The phase vocabulary is locked to
+// ProgressFetch + ProgressApply — no per-track asset events are
+// fabricated because the Syncer does not implement asset
+// orchestration (spec cli-sync progress rule).
 func (s *Syncer) Sync(ctx context.Context, manifestURL string) error {
+	prog := s.progressReporter()
+	prog.Report(ProgressEvent{Phase: ProgressFetch})
 	var cat *Catalog
 	err := Retry(ctx, s.Sleeper, IsTransientHTTP, func(ctx context.Context) error {
 		c, ferr := s.Fetch(ctx, manifestURL)
@@ -177,9 +186,28 @@ func (s *Syncer) Sync(ctx context.Context, manifestURL string) error {
 		return nil
 	})
 	if err != nil {
+		prog.Report(ProgressEvent{Phase: ProgressFetch, Done: true, Err: err})
 		return err
 	}
-	return s.Apply(cat)
+	prog.Report(ProgressEvent{Phase: ProgressFetch, Done: true})
+
+	prog.Report(ProgressEvent{Phase: ProgressApply})
+	if aerr := s.Apply(cat); aerr != nil {
+		prog.Report(ProgressEvent{Phase: ProgressApply, Done: true, Err: aerr})
+		return aerr
+	}
+	prog.Report(ProgressEvent{Phase: ProgressApply, Done: true})
+	return nil
+}
+
+// progressReporter returns s.Progress or NullProgressReporter when
+// the field is nil. Centralising the fallback here keeps the Sync
+// method free of nil checks at every emit site.
+func (s *Syncer) progressReporter() ProgressReporter {
+	if s.Progress == nil {
+		return NullProgressReporter{}
+	}
+	return s.Progress
 }
 
 // IsTransientHTTP is the default transient predicate Sync uses
