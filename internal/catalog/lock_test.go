@@ -1,4 +1,3 @@
-// Tests del lock exclusivo (PR-5, tareas 5.1/5.3/5.4/5.8).
 package catalog
 
 import (
@@ -21,8 +20,6 @@ func (f *fakeInspector) OwnerAlive(pid int) (bool, error) {
 	return f.alive[pid], nil
 }
 
-// seedLock escribe un .sync.lock arbitrario para reproducir
-// estados sin pasar por Acquire.
 func seedLock(t *testing.T, root string, body []byte) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(root, lockFileName), body, 0o600); err != nil {
@@ -30,8 +27,6 @@ func seedLock(t *testing.T, root string, body []byte) {
 	}
 }
 
-// 5.1: segundo Acquire concurrente -> ErrSyncInProgress; tras
-// Release del primero, un tercer Acquire vuelve a tener exito.
 func TestLockAcquireConcurrent(t *testing.T) {
 	root := t.TempDir()
 	first, err := Acquire(root, "first")
@@ -49,8 +44,6 @@ func TestLockAcquireConcurrent(t *testing.T) {
 	}
 }
 
-// 5.8 RED: Release no borra el lock ajeno; nonce on-disk debe
-// coincidir con el del caller.
 func TestLockRelease_NonceMismatch(t *testing.T) {
 	root := t.TempDir()
 	l, err := Acquire(root, "mine")
@@ -68,8 +61,6 @@ func TestLockRelease_NonceMismatch(t *testing.T) {
 	}
 }
 
-// IsLocked: ausencia=false, presente=true. La cobertura de
-// cacheRoot vacio y symlinks vive en el consumer guard CLI.
 func TestIsLocked(t *testing.T) {
 	root := t.TempDir()
 	if locked, _ := IsLocked(root); locked {
@@ -81,8 +72,6 @@ func TestIsLocked(t *testing.T) {
 	}
 }
 
-// 5.3/5.4: PID muerto -> quarantine; PID vivo -> respeta;
-// PID no verificable -> error accionable, no reclamar.
 func TestReclaimStale_TableDriven(t *testing.T) {
 	t.Run("dead_quarantines", func(t *testing.T) {
 		root := t.TempDir()

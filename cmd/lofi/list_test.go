@@ -118,27 +118,26 @@ func TestList_UnknownFlag_Exits2(t *testing.T) {
 	}
 }
 
-// TestConsumerLocks (PR-5 5.5/5.6): consumers fallan con "sync in progress" + code 1; procedural:rain bypass.
 func TestConsumerLocks(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	writeListCatalog(t)
+	withStubProceduralBackend(t)
 	root := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "lofi-player", "catalog")
 	lock, err := catalog.Acquire(root, "guard")
 	if err != nil {
 		t.Fatalf("seed lock: %v", err)
 	}
 	defer lock.Release()
-	for _, run := range []func() error{
+	stubWaitForSignal(t)
+	for _, fn := range []func() error{
 		func() error { return runList(nil) },
 		func() error { return runCredits(nil) },
 		func() error { return runPlay([]string{"track-drizzle"}) },
 	} {
-		code, stderr := captureStderr(t, func() int { return codeFor(run()) })
-		if code != 1 || !strings.Contains(stderr, "sync in progress") {
+		if code, stderr := captureStderr(t, func() int { return codeFor(fn()) }); code != 1 || !strings.Contains(stderr, "sync in progress") {
 			t.Errorf("code=%d stderr=%q", code, stderr)
 		}
 	}
-	stubWaitForSignal(t)
 	if code, _ := captureStderr(t, func() int { return codeFor(runPlay([]string{"procedural:rain"})) }); code != 0 {
 		t.Errorf("procedural:rain code=%d", code)
 	}
