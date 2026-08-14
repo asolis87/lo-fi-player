@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -242,7 +243,17 @@ func TestSync_OfflineDoesNotMutateCache(t *testing.T) {
 // from httptest.
 func pinnedSHAURL(t *testing.T, srvURL string) string {
 	t.Helper()
-	return "https://raw.githubusercontent.com/lofi-player/localhost/" + pinnedSHA + "/catalog/v1/manifest.json?srv=" + strings.TrimPrefix(srvURL, "http://")
+	return pinnedSHAURLFor(t, srvURL, pinnedSHA)
+}
+
+// pinnedSHAURLFor is the SHA-parameterized sibling of
+// pinnedSHAURL. PR-R1a A3 (TestSync_TwoSHAs_DifferentRoutes)
+// drives two syncs in one test against different immutable
+// commits so the URL byte-distinctness contract can be verified
+// end-to-end on a single server.
+func pinnedSHAURLFor(t *testing.T, srvURL, sha string) string {
+	t.Helper()
+	return "https://raw.githubusercontent.com/lofi-player/localhost/" + sha + "/catalog/v1/manifest.json?srv=" + strings.TrimPrefix(srvURL, "http://")
 }
 
 // TestSync_FullAssets_12GETs (PR-R1a A1/A2): a 4-track manifest
@@ -345,6 +356,152 @@ func TestSync_FullAssets_12GETs(t *testing.T) {
 	for i, id := range wantIDs {
 		if cat.Tracks[i].ID != id {
 			t.Fatalf("Tracks[%d].ID = %q, want %q", i, cat.Tracks[i].ID, id)
+		}
+	}
+}
+
+// TestSync_TwoSHAs_DifferentRoutes (PR-R1a A3): two immutable
+// commit SHAs MUST produce byte-distinct URLs for every one of
+// the 12 asset routes (4 tracks × 3 assets). The catalog-seed
+// spec scenario "Cambio de SHA produce URLs distintas" requires
+// that a future release rebaking catalog/v1 with a new commit
+// SHA serves the same logical content from a different URL set,
+// so cache invalidation, provenance tracking, and replay
+// protection rely on byte-distinct paths. The test runs Sync
+// against two SHAs on a single recording server, partitions the
+// captured request paths by SHA, and asserts every one of the 12
+// asset paths from SHA-A is byte-distinct from every one of the
+// 12 from SHA-B. It also rebuilds full pinned URLs from the
+// captured paths and runs ValidateURL on each so the URL
+// construction never relaxes the host/SHA/catalog routing
+// tenant.
+func TestSync_TwoSHAs_DifferentRoutes(t *testing.T) {
+	shaA := "aaaa111122223333444455556666777788889999"
+	shaB := "bbbb111122223333444455556666777788889999"
+	wantIDs := []string{
+		"bigger-questions",
+		"going-in-circles",
+		"it-was-like-that-when-i-got-here",
+		"lofi-lion-tame-the-beast",
+	}
+	tracks := make([]Track, 0, len(wantIDs))
+	for _, id := range wantIDs {
+		tr := validTrack()
+		tr.ID = id
+		tracks = append(tracks, tr)
+	}
+	want := &Catalog{
+		SchemaVersion: CurrentSchemaVersion,
+		Version:       "v1.0",
+		Tracks:        tracks,
+	}
+	manifestBytes, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	// Server records every request path so the test can partition
+	// hits by SHA and assert byte-distinctness across the two
+	// syncs. Two mutex-guarded slices keep the parallel httptest
+	// dispatch race-safe.
+	var hitsA, hitsB []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		switch {
+		case strings.Contains(r.URL.Path, shaA):
+			hitsA = append(hitsA, r.URL.Path)
+		case strings.Contains(r.URL.Path, shaB):
+			hitsB = append(hitsB, r.URL.Path)
+		}
+		mu.Unlock()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/audio.mp3"):
+			_, _ = w.Write([]byte(audioFixtureBytes))
+		case strings.HasSuffix(r.URL.Path, "/track.json"):
+			_, _ = w.Write(manifestBytes)
+		case strings.HasSuffix(r.URL.Path, "/LICENSE.txt"):
+			_, _ = w.Write([]byte("CC-BY-4.0\n"))
+		case strings.HasSuffix(r.URL.Path, "/manifest.json"):
+			_, _ = w.Write(manifestBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	runSync := func(t *testing.T, sha string) {
+		t.Helper()
+		dir := t.TempDir()
+		syn := NewSyncer(filepath.Join(dir, "v1"))
+		syn.HTTPClient = &http.Client{Transport: urlRewriteTransport{target: srv.URL}}
+		syn.Sleeper = noOpSleeper{}
+		url := pinnedSHAURLFor(t, srv.URL, sha)
+		if err := syn.Sync(context.Background(), url); err != nil {
+			t.Fatalf("Sync(sha=%s) = %v, want nil", sha, err)
+		}
+	}
+	runSync(t, shaA)
+	runSync(t, shaB)
+
+	mu.Lock()
+	capturedA := append([]string(nil), hitsA...)
+	capturedB := append([]string(nil), hitsB...)
+	mu.Unlock()
+
+	// Each Sync must drive 13 hits (1 manifest + 12 assets). The
+	// 12-route matrix is the contract under proof: a future
+	// regression that drops a per-asset GET would break here.
+	if len(capturedA) != 13 {
+		t.Fatalf("SHA-A hits = %d, want 13 (1 manifest + 12 assets)", len(capturedA))
+	}
+	if len(capturedB) != 13 {
+		t.Fatalf("SHA-B hits = %d, want 13 (1 manifest + 12 assets)", len(capturedB))
+	}
+
+	// Drop the manifest path on each side so the byte-distinct
+	// assertion only covers the 12 asset routes the spec
+	// enumerates. The manifest URL is also byte-distinct (its
+	// SHA segment differs), but the catalog-seed scenario
+	// specifies the 12 asset routes as the matrix.
+	assetA := make(map[string]struct{}, 12)
+	for _, p := range capturedA {
+		if !strings.HasSuffix(p, "/manifest.json") {
+			assetA[p] = struct{}{}
+		}
+	}
+	assetB := make(map[string]struct{}, 12)
+	for _, p := range capturedB {
+		if !strings.HasSuffix(p, "/manifest.json") {
+			assetB[p] = struct{}{}
+		}
+	}
+	if len(assetA) != 12 {
+		t.Fatalf("SHA-A distinct asset paths = %d, want 12", len(assetA))
+	}
+	if len(assetB) != 12 {
+		t.Fatalf("SHA-B distinct asset paths = %d, want 12", len(assetB))
+	}
+
+	// Every asset path from SHA-A MUST be byte-distinct from every
+	// asset path from SHA-B. A collision here means the URL
+	// construction collapsed the SHA segment, which would let a
+	// hostile release serve different content under the same path.
+	for p := range assetA {
+		if _, ok := assetB[p]; ok {
+			t.Errorf("URL collision across SHAs: %q appears in SHA-A and SHA-B", p)
+		}
+	}
+
+	// Every hit URL (manifest + 12 assets per SHA = 26 total) MUST
+	// pass ValidateURL. The captured path already contains the
+	// owner/repo/SHA segments the pinned URL pinnedSHAURLFor
+	// builds, so the full URL is just the host + path. A
+	// regression that bypassed the SHA segment, switched host, or
+	// used a floating ref would fail here.
+	for _, p := range append(capturedA, capturedB...) {
+		full := "https://raw.githubusercontent.com" + p
+		if err := ValidateURL(full); err != nil {
+			t.Errorf("ValidateURL(%q) = %v, want nil", full, err)
 		}
 	}
 }

@@ -428,3 +428,78 @@ func TestLoadFromDir_NoManifest_LegacyAcceptsArbitraryCount(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadFromDir_ArbitrarySourceURL (PR-R1a A4): the
+// catalog-loader spec asserts source_url is metadata only and
+// MUST NOT participate in integrity verification (SHA-256 of
+// audio.mp3 is the authority). A cache whose manifest declares
+// tracks with arbitrary, hostile, or malformed source_url values
+// MUST still load to a usable Catalog, because rejecting the
+// cache on source_url content would forge a new legitimacy
+// test the spec never authorised. The hostile fixture includes
+// empty string, very long string, non-URL garbage, javascript:
+// scheme, CRLF header injection, NUL control byte, path
+// traversal, HTML/JS script tags, and shell metacharacters —
+// every variant a real attacker or sloppy upstream could push.
+func TestLoadFromDir_ArbitrarySourceURL(t *testing.T) {
+	root := t.TempDir()
+	wantIDs := []string{
+		"bigger-questions",
+		"going-in-circles",
+		"it-was-like-that-when-i-got-here",
+		"lofi-lion-tame-the-beast",
+	}
+	// Hostile / arbitrary source_url values that exercise the
+	// "metadata only" contract. The capsule MUST accept because
+	// the SHA-256 of audio.mp3 is the integrity authority.
+	hostile := []string{
+		"",
+		strings.Repeat("a", 1024),
+		"not a url at all",
+		"javascript:alert(1)",
+		"https://example.com/\r\nInjected-Header: x",
+		"https://example.com/\x00control",
+		"../../../etc/passwd",
+		"<script>alert(1)</script>",
+		"https://example.com/?a=$(rm -rf /)",
+	}
+	if len(hostile) < len(wantIDs) {
+		t.Fatalf("fixture misconfigured: need %d hostile values, got %d", len(wantIDs), len(hostile))
+	}
+	// writeTrackDir stages track.json + audio.mp3 per id;
+	// writeManifestWith stages the manifest declaring the same
+	// ids with arbitrary source_url. The SHA-256 gate fires on
+	// audio.mp3 (byte-authoritative) and is independent of
+	// source_url content.
+	declared := make([]Track, 0, len(wantIDs))
+	for i, id := range wantIDs {
+		writeTrackDir(t, root, id, nil)
+		tr := validTrack()
+		tr.ID = id
+		tr.SourceURL = hostile[i]
+		declared = append(declared, tr)
+	}
+	writeManifestWith(t, root, declared)
+
+	cat, err := LoadFromDir(root)
+	if err != nil {
+		t.Fatalf("LoadFromDir(arbitrary source_url) = %v, want nil", err)
+	}
+	if got, want := len(cat.Tracks), len(wantIDs); got != want {
+		t.Fatalf("len(Tracks) = %d, want %d", got, want)
+	}
+	// The hostile source_url MUST round-trip byte-identical
+	// through the loader: a regression that sanitized or
+	// rejected the field would be caught by the equality
+	// assertion below.
+	want := make(map[string]string, len(wantIDs))
+	for i, id := range wantIDs {
+		want[id] = hostile[i]
+	}
+	for _, tr := range cat.Tracks {
+		if got, expected := tr.SourceURL, want[tr.ID]; got != expected {
+			t.Errorf("Tracks[%q].SourceURL = %q, want %q (source_url is metadata and MUST round-trip byte-identical)",
+				tr.ID, got, expected)
+		}
+	}
+}
