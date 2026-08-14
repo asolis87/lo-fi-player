@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"github.com/asolis87/lo-fi-player/internal/catalog"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -23,4 +25,17 @@ func catalogCacheDir() (string, error) {
 		}
 	}
 	return filepath.Join(cacheRoot, "lofi-player", "catalog", "v1"), nil
+}
+
+// consumerLockGuard: code 1 + "sync in progress" si locked; nil cc. Best-effort.
+func consumerLockGuard(cmd string) error {
+	dir, err := catalogCacheDir()
+	if err != nil {
+		return nil
+	}
+	if locked, _ := catalog.IsLocked(filepath.Dir(dir)); locked {
+		fmt.Fprintf(os.Stderr, "lofi %s: sync in progress\n", cmd)
+		return &commandError{code: 1}
+	}
+	return nil
 }

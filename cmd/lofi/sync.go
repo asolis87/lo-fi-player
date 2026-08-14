@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/asolis87/lo-fi-player/internal/catalog"
 )
@@ -48,8 +49,7 @@ var lastSyncErr error
 //     is told the cache is unchanged and can retry later.
 //   - Anything else: the error message is surfaced verbatim.
 //
-// On success the function prints a one-line confirmation to stderr
-// so stdout stays free for scripting use.
+// Adquiere el cache-root lock antes de tocar el cache (PR-5).
 func runSync(args []string) error {
 	if len(args) > 0 {
 		fmt.Fprintf(os.Stderr, "lofi sync: unexpected argument %q\n\n%s", args[0], usage)
@@ -63,6 +63,17 @@ func runSync(args []string) error {
 		lastSyncErr = &commandError{code: 1}
 		return lastSyncErr
 	}
+	lock, err := catalog.Acquire(filepath.Dir(cacheRoot), "sync")
+	if err != nil {
+		if errors.Is(err, catalog.ErrSyncInProgress) {
+			fmt.Fprintln(os.Stderr, "lofi sync: sync in progress")
+		} else {
+			fmt.Fprintf(os.Stderr, "lofi sync: acquire lock: %v\n", err)
+		}
+		lastSyncErr = &commandError{code: 1}
+		return lastSyncErr
+	}
+	defer lock.Release()
 
 	url := catalog.ResolveManifestURL(syncRepo, syncOwner, catalog.FirstRunCommitSHA)
 	syn := syncerFactory(cacheRoot)

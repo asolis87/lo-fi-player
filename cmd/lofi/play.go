@@ -28,6 +28,8 @@ import (
 // $PATH or a working procedural fallback.
 var selectAudioBackend = audio.Select
 
+var newProceduralBackend = audio.NewProceduralBackend
+
 // mpvBackendFactory is the package-level seam the interactive
 // selector wires via audio.WithMpvFactory. Production builds a
 // real *audio.MpvBackend; tests swap the variable for a function
@@ -133,9 +135,14 @@ func runPlay(args []string) error {
 }
 
 // runHeadlessPlay: Load -> Play -> RecordPlayed+Persist -> waitForSignal
-// -> cliSignalFinalize -> Close. State is best-effort: nil still plays.
+// -> cliSignalFinalize -> Close. Catalog tracks consultan lock; procedural: rain NO (REQ-MVP-2).
 func runHeadlessPlay(target string) error {
 	state := config.LoadPlaybackState()
+	if !strings.HasPrefix(target, "procedural:") {
+		if err := consumerLockGuard("play"); err != nil {
+			return err
+		}
+	}
 
 	backend, audioPath, err := resolveHeadlessBackend(target)
 	if err != nil {
@@ -212,7 +219,7 @@ func proceduralBackend(target string) (audio.AudioBackend, error) {
 		fmt.Fprintf(os.Stderr, "lofi play: unknown procedural station %q (want procedural:rain)\n", target)
 		return nil, &commandError{code: 1}
 	}
-	b := audio.NewProceduralBackend(
+	b := newProceduralBackend(
 		audio.WithGenerator(gen),
 		audio.WithSampleRate(44100),
 	)

@@ -41,6 +41,10 @@ func runCredits(args []string) error {
 		}
 	}
 
+	if err := consumerLockGuard("credits"); err != nil {
+		return err
+	}
+
 	catalogRoot, err := creditsCatalogRoot()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lofi credits: cannot locate catalog: %v\n", err)

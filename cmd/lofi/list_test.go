@@ -117,3 +117,28 @@ func TestList_UnknownFlag_Exits2(t *testing.T) {
 		t.Fatalf("expected usage banner, got %q", stderr)
 	}
 }
+
+func TestConsumerLocks(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	writeListCatalog(t)
+	withStubProceduralBackend(t)
+	root := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "lofi-player", "catalog")
+	lock, err := catalog.Acquire(root, "guard")
+	if err != nil {
+		t.Fatalf("seed lock: %v", err)
+	}
+	defer lock.Release()
+	stubWaitForSignal(t)
+	for _, fn := range []func() error{
+		func() error { return runList(nil) },
+		func() error { return runCredits(nil) },
+		func() error { return runPlay([]string{"track-drizzle"}) },
+	} {
+		if code, stderr := captureStderr(t, func() int { return codeFor(fn()) }); code != 1 || !strings.Contains(stderr, "sync in progress") {
+			t.Errorf("code=%d stderr=%q", code, stderr)
+		}
+	}
+	if code, _ := captureStderr(t, func() int { return codeFor(runPlay([]string{"procedural:rain"})) }); code != 0 {
+		t.Errorf("procedural:rain code=%d", code)
+	}
+}

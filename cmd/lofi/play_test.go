@@ -145,6 +145,7 @@ func TestPlay_HeadlessProceduralRainWritesAudioToDevice(t *testing.T) {
 // `lofi play procedural:rain` MUST return a nil error from the
 // end-to-end runPlay path.
 func TestPlay_HeadlessProceduralRainStillWorks(t *testing.T) {
+	withStubProceduralBackend(t)
 	stubWaitForSignal(t)
 
 	gen := resolveProcedural("procedural:rain")
@@ -502,6 +503,13 @@ func (r *recordingDevice) Write(s []int16) error {
 }
 func (r *recordingDevice) Close() error     { return nil }
 func (r *recordingDevice) sampleCount() int { r.mu.Lock(); defer r.mu.Unlock(); return len(r.written) }
+
+func withStubProceduralBackend(t *testing.T) {
+	newProceduralBackend = func(opts ...audio.ProceduralOption) *audio.ProceduralBackend {
+		return audio.NewProceduralBackend(append(opts, audio.WithDevice(newRecordingDevice()))...)
+	}
+	t.Cleanup(func() { newProceduralBackend = audio.NewProceduralBackend })
+}
 
 // TestRunHeadlessPlay_ResolvesAudioPath is the PR-D #3.3 gate:
 // when `lofi play <id>` resolves a catalog track, runHeadlessPlay
