@@ -150,14 +150,13 @@ func captureBoth(t *testing.T, fn func() int) (int, string, string) {
 	return code, outBuf.String(), errBuf.String()
 }
 
-// TestSync_StderrProgress_Success (PR-6B 6B.3): a happy-path
-// runSync against an httptest.Server serving a valid manifest
-// MUST emit exactly the four progress lines the spec requires
-// — "lofi sync: fetch...", "lofi sync: fetch done",
-// "lofi sync: apply...", "lofi sync: apply done" — to stderr
-// in that order, and MUST produce no stdout output. No per-track
-// progress events are emitted because the Syncer does not
-// implement asset orchestration.
+// TestSync_StderrProgress_Success (PR-6B 6B.3 + PR-R1a): a
+// happy-path runSync MUST emit the four spec progress lines on
+// stderr in order and produce no stdout output. The fixture
+// dispatches per URL so the audio.mp3 SHA gate accepts the
+// deterministic "dummy bytes" payload (SHA matches the
+// ChecksumSHA256 in the manifest); the per-track asset loop
+// inside Sync (PR-R1a) drives 3 additional GETs per track.
 func TestSync_StderrProgress_Success(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	const validSHA = "abcdef0123456789abcdef0123456789abcdef01"
@@ -191,8 +190,14 @@ func TestSync_StderrProgress_Success(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
+		// PR-R1a per-asset dispatch: audio.mp3 returns the audio
+		// bytes whose SHA matches ChecksumSHA256; track.json +
+		// LICENSE.txt get arbitrary bytes (downloadAsset does not
+		// validate those contents).
+		if strings.HasSuffix(r.URL.Path, "/audio.mp3") {
+			_, _ = w.Write([]byte("dummy bytes"))
+			return
+		}
 		_, _ = w.Write(body)
 	}))
 	t.Cleanup(srv.Close)
@@ -211,8 +216,8 @@ func TestSync_StderrProgress_Success(t *testing.T) {
 	if stdout != "" {
 		t.Errorf("stdout must be empty for happy path, got %q", stdout)
 	}
-	if hits.Load() != 1 {
-		t.Errorf("server hit %d times, want exactly 1 (Fetch+Apply, no retries)", hits.Load())
+	if hits.Load() != 4 {
+		t.Errorf("server hit %d times, want exactly 4 (1 manifest + 3 assets, no retries)", hits.Load())
 	}
 
 	// The four spec-mandated progress lines MUST appear on stderr
@@ -250,11 +255,15 @@ func (t stdoutURLRewriteTransport) RoundTrip(req *http.Request) (*http.Response,
 	if raw == "" {
 		raw = t.target
 	}
+	// Preserve the request path so the fixture's per-asset
+	// dispatch (e.g. /audio.mp3 vs /manifest.json) sees the
+	// original URL the Syncer built.
+	hostPort := strings.TrimPrefix(raw, "http://")
 	cloned := req.Clone(req.Context())
 	cloned.URL = &url.URL{
 		Scheme: "http",
-		Host:   strings.TrimPrefix(raw, "http://"),
-		Path:   "/",
+		Host:   hostPort,
+		Path:   req.URL.Path,
 	}
 	cloned.RequestURI = ""
 	return http.DefaultTransport.RoundTrip(cloned)

@@ -1,19 +1,23 @@
 // The Syncer is the catalog package's transactional fetch +
-// apply engine. It owns the cache directory, validates the
-// SHA-pinned manifest URL with ValidateURL (REQ-CAT-3 / decision
-// #289), and writes the new manifest atomically so a partial
-// fetch can never poison the local cache (S-CAT-2).
+// apply engine. PR-R1a iterates the manifest to download every
+// per-track asset into a staging directory with streaming SHA-256
+// and promotes staging → v1 only when all verifications pass.
+// Promotion atomicity / failure isolation is PR-R1b; per-asset
+// progress is PR-R2.
 package catalog
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -162,19 +166,20 @@ func (s *Syncer) Apply(c *Catalog) error {
 	return nil
 }
 
-// Sync is the high-level entrypoint: fetch manifestURL (which
-// MUST pass ValidateURL) and apply atomically. Network failures
-// leave the local cache untouched (S-CAT-2); callers can match
-// ErrOffline with errors.Is to surface a recoverable message.
-// PR-6 wraps Fetch in the canonical retry policy (3 attempts,
-// 1s+2s sleeps). PR-6B wires the progress seam: each observable
-// operation emits a start event, then a done event (with Err set
-// when the operation failed). The phase vocabulary is locked to
-// ProgressFetch + ProgressApply — no per-track asset events are
-// fabricated because the Syncer does not implement asset
-// orchestration (spec cli-sync progress rule).
+// Sync is the high-level entrypoint (R-R1a). It fetches the
+// pinned manifest, creates a sibling staging directory, writes
+// the parsed manifest there, iterates the declared tracks and
+// downloads track.json/audio.mp3/LICENSE.txt per track into
+// staging/<id>/<filename> with streaming SHA-256, then promotes
+// staging → v1 atomically via Promote (PR-3). PR-6 wraps Fetch
+// in 3-attempt retry; PR-R1a wraps each per-asset download in
+// the same primitive. PR-6B wires ProgressFetch + ProgressApply
+// (no per-asset events; PR-R2 will revisit). Network failures
+// leave the cache untouched (S-CAT-2); callers match ErrOffline
+// with errors.Is.
 func (s *Syncer) Sync(ctx context.Context, manifestURL string) error {
 	prog := s.progressReporter()
+
 	prog.Report(ProgressEvent{Phase: ProgressFetch})
 	var cat *Catalog
 	err := Retry(ctx, s.Sleeper, IsTransientHTTP, func(ctx context.Context) error {
@@ -191,13 +196,125 @@ func (s *Syncer) Sync(ctx context.Context, manifestURL string) error {
 	}
 	prog.Report(ProgressEvent{Phase: ProgressFetch, Done: true})
 
-	prog.Report(ProgressEvent{Phase: ProgressApply})
-	if aerr := s.Apply(cat); aerr != nil {
-		prog.Report(ProgressEvent{Phase: ProgressApply, Done: true, Err: aerr})
-		return aerr
+	parsed, perr := url.Parse(manifestURL)
+	if perr != nil {
+		return fmt.Errorf("catalog: parse %s: %w", manifestURL, perr)
 	}
+	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
+	if len(parts) < 3 {
+		return fmt.Errorf("catalog: url path=%q has %d segments, want >=3", parsed.Path, len(parts))
+	}
+	base := fmt.Sprintf("%s://%s/%s/%s", parsed.Scheme, parsed.Host, parts[0], parts[1])
+	commitSHA := parts[2]
+	if !pinnedSHARe.MatchString(commitSHA) {
+		return fmt.Errorf("%w: sha=%q is not 40 lowercase hex chars", ErrFloatRef, commitSHA)
+	}
+	cacheRoot := filepath.Dir(s.CacheDir)
+	stagingDir, err := Stage(cacheRoot, fmt.Sprintf("r1a-%d-%d", os.Getpid(), syncNonceCounter))
+	if err != nil {
+		return fmt.Errorf("catalog: stage %s: %w", cacheRoot, err)
+	}
+	syncNonceCounter++
+	committed := false
+	defer func() {
+		if !committed {
+			_ = Cleanup(stagingDir)
+		}
+	}()
+
+	target := filepath.Join(stagingDir, manifestFileName)
+	data, err := json.MarshalIndent(cat, "", "  ")
+	if err != nil {
+		return fmt.Errorf("catalog: marshal manifest: %w", err)
+	}
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		return fmt.Errorf("catalog: write %s: %w", target, err)
+	}
+
+	// Each per-asset download gets its own 3-attempt retry budget so
+	// a transient 5xx on track-002 does not poison track-003.
+	type asset struct {
+		name string
+		max  int64
+		sha  string
+	}
+	audioMax, _ := maxBytesFor("audio.mp3")
+	trackMax, _ := maxBytesFor("track.json")
+	licenseMax, _ := maxBytesFor("LICENSE.txt")
+	for i := range cat.Tracks {
+		tr := &cat.Tracks[i]
+		for _, a := range []asset{
+			{"track.json", trackMax, ""},
+			{"audio.mp3", audioMax, tr.ChecksumSHA256},
+			{"LICENSE.txt", licenseMax, ""},
+		} {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := Retry(ctx, s.Sleeper, IsTransientHTTP, func(ctx context.Context) error {
+				_, derr := s.downloadAsset(ctx, base, commitSHA, tr.ID, a.name, a.max, a.sha, stagingDir)
+				return derr
+			}); err != nil {
+				return fmt.Errorf("catalog: download %s/%s: %w", tr.ID, a.name, err)
+			}
+		}
+	}
+
+	prog.Report(ProgressEvent{Phase: ProgressApply})
+	if perr := Promote(cacheRoot, stagingDir, nil); perr != nil {
+		prog.Report(ProgressEvent{Phase: ProgressApply, Done: true, Err: perr})
+		return perr
+	}
+	committed = true
 	prog.Report(ProgressEvent{Phase: ProgressApply, Done: true})
 	return nil
+}
+
+// syncNonceCounter tags each Sync call's staging directory with a
+// monotonic counter so concurrent calls inside one test do not
+// collide.
+var syncNonceCounter uint64
+
+// downloadAsset streams one immutable asset to
+// <stagingDir>/<id>/<filename>, hashing bytes on the same
+// io.Copy (PR-2A streaming). When expectedSHA is non-empty the
+// digest MUST match or downloadAsset removes the staged file and
+// returns ErrChecksumMismatch.
+func (s *Syncer) downloadAsset(
+	ctx context.Context,
+	base, commitSHA, id, filename string,
+	maxBytes int64,
+	expectedSHA string,
+	stagingDir string,
+) (FetchResult, error) {
+	assetURL, err := AssetURL(base, commitSHA, id, filename)
+	if err != nil {
+		return FetchResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
+	if err != nil {
+		return FetchResult{}, fmt.Errorf("%w: build request for %s: %v", ErrOffline, assetURL, err)
+	}
+	trackDir := filepath.Join(stagingDir, id)
+	if err := os.MkdirAll(trackDir, 0o700); err != nil {
+		return FetchResult{}, fmt.Errorf("catalog: mkdir %s: %w", trackDir, err)
+	}
+	dest := filepath.Join(trackDir, filename)
+	hasher := sha256.New()
+	client := http.DefaultClient
+	if c, ok := s.HTTPClient.(*http.Client); ok {
+		client = c
+	}
+	result, err := fetchStreaming(ctx, client, req, dest, maxBytes, hasher)
+	if err != nil {
+		return FetchResult{}, err
+	}
+	if expectedSHA != "" && !strings.EqualFold(result.SHA256Hex, expectedSHA) {
+		_ = os.Remove(dest)
+		return FetchResult{}, fmt.Errorf("%w: id=%s name=%s expected=%s actual=%s",
+			ErrChecksumMismatch, id, filename, strings.ToLower(expectedSHA), result.SHA256Hex)
+	}
+	return result, nil
 }
 
 // progressReporter returns s.Progress or NullProgressReporter when
