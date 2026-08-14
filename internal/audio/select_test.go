@@ -12,6 +12,8 @@ import (
 // the probe), Select MUST return a working procedural AudioBackend
 // rather than failing the whole binary.
 func TestSelect_NoMpvFallbackProcedural(t *testing.T) {
+	deviceFactoryOverride = noopDevice{}
+	t.Cleanup(func() { deviceFactoryOverride = nil })
 	ctx := context.Background()
 	b, err := Select(ctx,
 		WithMpvProbe(func() (string, bool) { return "", false }),

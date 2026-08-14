@@ -34,6 +34,22 @@ const (
 // the cache (S-CAT-2).
 var ErrOffline = errors.New("catalog: network offline")
 
+// HTTPStatusError is the typed error Fetch returns when the
+// server replies with a non-2xx status. Wraps ErrOffline so
+// errors.Is(err, ErrOffline) keeps working; Transient lets the
+// retry predicate distinguish 404 (permanent) from 503 (transient).
+type HTTPStatusError struct {
+	StatusCode int
+	URL        string
+	Transient  bool
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("GET %s: status %d", e.URL, e.StatusCode)
+}
+
+func (e *HTTPStatusError) Unwrap() error { return ErrOffline }
+
 // HTTPClient is the minimal subset of *http.Client the Syncer
 // needs; injecting an interface lets tests swap in
 // httptest.Server's client or a failing transport without DNS
@@ -45,10 +61,12 @@ type HTTPClient interface {
 // Syncer fetches the SHA-pinned manifest over HTTPS and applies
 // it atomically to the local cache. HTTPClient is injectable so
 // tests can simulate offline behaviour; CacheDir is the directory
-// Apply will populate with the target manifest file.
+// Apply will populate with the target manifest file. Sleeper is
+// optional (PR-6): nil falls back to RealSleeper.
 type Syncer struct {
 	HTTPClient HTTPClient
 	CacheDir   string
+	Sleeper    Sleeper
 }
 
 // NewSyncer returns a Syncer backed by http.DefaultClient and the
@@ -84,7 +102,7 @@ func (s *Syncer) Fetch(ctx context.Context, manifestURL string) (*Catalog, error
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: GET %s: status %d", ErrOffline, manifestURL, resp.StatusCode)
+		return nil, &HTTPStatusError{StatusCode: resp.StatusCode, URL: manifestURL, Transient: isTransient(resp.StatusCode)}
 	}
 	if resp.ContentLength > maxManifestBytes {
 		return nil, fmt.Errorf("catalog: manifest %s reports Content-Length=%d, max %d", manifestURL, resp.ContentLength, maxManifestBytes)
@@ -146,10 +164,34 @@ func (s *Syncer) Apply(c *Catalog) error {
 // MUST pass ValidateURL) and apply atomically. Network failures
 // leave the local cache untouched (S-CAT-2); callers can match
 // ErrOffline with errors.Is to surface a recoverable message.
+// PR-6 wraps Fetch in the canonical retry policy (3 attempts,
+// 1s+2s sleeps). Progress reporting is deferred to PR-6B.
 func (s *Syncer) Sync(ctx context.Context, manifestURL string) error {
-	cat, err := s.Fetch(ctx, manifestURL)
+	var cat *Catalog
+	err := Retry(ctx, s.Sleeper, IsTransientHTTP, func(ctx context.Context) error {
+		c, ferr := s.Fetch(ctx, manifestURL)
+		if ferr != nil {
+			return ferr
+		}
+		cat = c
+		return nil
+	})
 	if err != nil {
 		return err
 	}
 	return s.Apply(cat)
+}
+
+// IsTransientHTTP is the default transient predicate Sync uses
+// to gate retries: 408/429/5xx → transient; 4xx other → permanent.
+// Transport failures (no status code) → transient via ErrOffline.
+func IsTransientHTTP(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *HTTPStatusError
+	if errors.As(err, &httpErr) {
+		return httpErr.Transient
+	}
+	return errors.Is(err, ErrOffline)
 }

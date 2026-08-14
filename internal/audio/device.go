@@ -158,12 +158,17 @@ type noopDevice struct{}
 func (noopDevice) Write([]int16) error { return nil }
 func (noopDevice) Close() error        { return nil }
 
+var deviceFactoryOverride Device
+
 // defaultDeviceFactory constructs the device the procedural
 // backend uses when WithDevice was not supplied. Tries to open
 // a real oto audio context; falls back to a no-op device so
 // the backend's lifecycle methods keep working when no audio
 // subsystem is available.
 func defaultDeviceFactory(sampleRate int) Device {
+	if deviceFactoryOverride != nil {
+		return deviceFactoryOverride
+	}
 	d, err := newOtoDevice(sampleRate)
 	if err != nil {
 		return noopDevice{}

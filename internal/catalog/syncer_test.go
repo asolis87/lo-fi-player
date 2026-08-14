@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // validCatalog returns a minimal Catalog that parses cleanly so
@@ -206,6 +207,7 @@ func TestSync_OfflineDoesNotMutateCache(t *testing.T) {
 	}
 	syn := NewSyncer(dir)
 	syn.HTTPClient = &http.Client{Transport: failingTransport{}}
+	syn.Sleeper = noOpSleeper{}
 	url := pinnedSHAURL(t, "https://raw.githubusercontent.com/asolis87/lo-fi-player/"+pinnedSHA+"/catalog/v1/manifest.json")
 
 	err := syn.Sync(context.Background(), url)
@@ -365,4 +367,14 @@ type failingTransport struct{}
 
 func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, io.EOF
+}
+
+// noOpSleeper returns immediately without blocking. Used by
+// tests that don't care about exact sleep timing but want to
+// skip the 1s+2s wall-clock sleeps the retry primitive would
+// otherwise impose.
+type noOpSleeper struct{}
+
+func (noOpSleeper) Sleep(ctx context.Context, _ time.Duration) error {
+	return ctx.Err()
 }

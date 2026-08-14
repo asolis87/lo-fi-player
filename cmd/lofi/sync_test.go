@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/asolis87/lo-fi-player/internal/catalog"
 )
@@ -20,23 +24,36 @@ func withInjectedSyncer(t *testing.T, factory func(string) *catalog.Syncer) {
 	t.Cleanup(func() { syncerFactory = orig })
 }
 
-// offlineTransport is an http.RoundTripper that always returns an
-// error; used to simulate offline network without DNS lookups.
-type offlineTransport struct{}
-
-func (offlineTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, io.EOF
+// withInjectedContextFactory swaps runSyncContextFactory for the
+// duration of a test so cancellation can be triggered without
+// touching the real OS signal table.
+func withInjectedContextFactory(t *testing.T, factory func() (context.Context, context.CancelFunc)) {
+	t.Helper()
+	orig := runSyncContextFactory
+	runSyncContextFactory = factory
+	t.Cleanup(func() { runSyncContextFactory = orig })
 }
 
-// TestSync_OfflineExits1 guards S-CAT-2 via the runSync CLI path:
-// when the network is unreachable, `lofi sync` MUST exit non-zero
-// with a recoverable message and the local cache MUST stay
-// untouched. We override FirstRunCommitSHA to a valid 40-hex SHA so
-// the URL passes ValidateURL; the injected failing transport then
-// guarantees the Fetch step fails with ErrOffline.
+// noOpSleeperCatalog evita los sleeps 1s+2s del retry primitive.
+type noOpSleeperCatalog struct{}
+
+func (noOpSleeperCatalog) Sleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+
+type offlineTransport struct{}
+
+func (offlineTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, io.EOF }
+
+type blockingTransport struct{}
+
+func (blockingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+// TestSync_OfflineExits1 guards S-CAT-2 via the runSync CLI path.
+// FirstRunCommitSHA overrides; failing transport guarantees ErrOffline.
 func TestSync_OfflineExits1(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-
 	const validSHA = "abcdef0123456789abcdef0123456789abcdef01"
 	origSHA := catalog.FirstRunCommitSHA
 	catalog.FirstRunCommitSHA = validSHA
@@ -45,6 +62,7 @@ func TestSync_OfflineExits1(t *testing.T) {
 	withInjectedSyncer(t, func(dir string) *catalog.Syncer {
 		s := catalog.NewSyncer(dir)
 		s.HTTPClient = &http.Client{Transport: offlineTransport{}}
+		s.Sleeper = noOpSleeperCatalog{}
 		return s
 	})
 
@@ -57,5 +75,38 @@ func TestSync_OfflineExits1(t *testing.T) {
 	}
 	if !errors.Is(lastSyncErr, catalog.ErrOffline) {
 		t.Fatalf("lastSyncErr = %v, want wrapped ErrOffline", lastSyncErr)
+	}
+}
+
+// TestSync_SIGINT_Exit130_LockReleased: ctx cancel → exit 130 +
+// lock released via defer.
+func TestSync_SIGINT_Exit130_LockReleased(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	const validSHA = "abcdef0123456789abcdef0123456789abcdef01"
+	origSHA := catalog.FirstRunCommitSHA
+	catalog.FirstRunCommitSHA = validSHA
+	t.Cleanup(func() { catalog.FirstRunCommitSHA = origSHA })
+
+	withInjectedSyncer(t, func(dir string) *catalog.Syncer {
+		s := catalog.NewSyncer(dir)
+		s.HTTPClient = &http.Client{Transport: blockingTransport{}}
+		s.Sleeper = noOpSleeperCatalog{}
+		return s
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	withInjectedContextFactory(t, func() (context.Context, context.CancelFunc) { return ctx, cancel })
+	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+
+	code, stderr := captureStderr(t, func() int { return codeFor(runSync(nil)) })
+	if code != 130 {
+		t.Fatalf("runSync code = %d, want 130, stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "cancelled") {
+		t.Errorf("missing cancelled message, stderr=%q", stderr)
+	}
+	root := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "lofi-player", "catalog")
+	if locked, _ := catalog.IsLocked(root); locked {
+		t.Errorf("lock not released after cancel")
 	}
 }

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/asolis87/lo-fi-player/internal/catalog"
 )
@@ -25,6 +27,11 @@ const (
 // keeps the default value that delegates to catalog.NewSyncer.
 var syncerFactory = func(cacheDir string) *catalog.Syncer {
 	return catalog.NewSyncer(cacheDir)
+}
+
+// runSyncContextFactory returns the ctx + cancel func. Tests inject plain context.
+var runSyncContextFactory = func() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 }
 
 // lastSyncErr captures the most recent error runSync returned so
@@ -57,6 +64,9 @@ func runSync(args []string) error {
 		return lastSyncErr
 	}
 
+	ctx, stop := runSyncContextFactory()
+	defer stop()
+
 	cacheRoot, err := catalogCacheDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lofi sync: cannot locate cache dir: %v\n", err)
@@ -78,8 +88,12 @@ func runSync(args []string) error {
 	url := catalog.ResolveManifestURL(syncRepo, syncOwner, catalog.FirstRunCommitSHA)
 	syn := syncerFactory(cacheRoot)
 
-	if err := syn.Sync(context.Background(), url); err != nil {
+	if err := syn.Sync(ctx, url); err != nil {
 		lastSyncErr = err
+		if ctx.Err() != nil {
+			fmt.Fprintln(os.Stderr, "lofi sync: cancelled")
+			return &commandError{code: 130}
+		}
 		switch {
 		case errors.Is(err, catalog.ErrOffline):
 			fmt.Fprintln(os.Stderr, "lofi sync: network unavailable; cache left untouched, retry when online")
